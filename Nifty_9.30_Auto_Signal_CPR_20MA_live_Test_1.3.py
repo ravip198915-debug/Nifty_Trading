@@ -103,6 +103,10 @@ BLOCK_MSG_SHOWN=False
 day_closed = False
 SCRIPT_RUNNING = True
 WS_STOPPED = False
+printed_930 = False
+printed_entry = False
+printed_exit = False
+summary_sent = False
 
 AUTO_SIGNAL="NO TRADE"
 allowed_side=None
@@ -112,6 +116,11 @@ AUTO_READY = False
 
 trade={}
 day_closed=False
+trade_taken = False
+entry_price = None
+exit_price = None
+quantity = 0
+pnl = 0
 
 candle={"high":None,"low":None}
 candle_done=False
@@ -252,7 +261,7 @@ def fetch_spot():
 
 # ================= 9:30 CANDLE =================
 def fetch_930_candle():
-    global candle_done
+    global candle_done, printed_930
 
     if candle_done:
         return
@@ -262,7 +271,6 @@ def fetch_930_candle():
 
     # ⭐ WAIT UNTIL 9:35
     if now < dtime(9,35):
-        print("Market not opened yet – waiting for 9:30 candle")
         return
 
     data = kite.historical_data(
@@ -281,9 +289,19 @@ def fetch_930_candle():
     candle["low"] = data[0]["low"]
     candle_done = True
 
-    print(f"{GREEN}Fetched 9:30 candle successfully{RESET}")
-    
-    send_telegram("Fetched 9:30 candle successfully")
+    if not printed_930:
+        high_buffer = candle["high"] + 1
+        low_buffer = candle["low"] - 1
+        levels_msg = (
+            "📊 9:30 LEVELS\n"
+            f"High: {candle['high']}\n"
+            f"Low: {candle['low']}\n"
+            f"High Buffer: {high_buffer}\n"
+            f"Low Buffer: {low_buffer}"
+        )
+        print(levels_msg)
+        send_telegram(levels_msg)
+        printed_930 = True
 
     calculate_auto_signal()
     
@@ -430,6 +448,8 @@ def place_sl_target(sym, entry_price):
 
 def monitor_orders(sym, sl_order_id, target_order_id):
     global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS, day_closed, SCRIPT_RUNNING
+    global printed_exit, exit_price, pnl, entry_price, quantity
+    global summary_sent, trade_taken
     while trade_open and (sl_order_id or target_order_id):
         time.sleep(POLL_INTERVAL)
         sl_od = get_order_by_id(sl_order_id, force=True) if sl_order_id else None
@@ -445,6 +465,8 @@ def monitor_orders(sym, sl_order_id, target_order_id):
                 except Exception:
                     pass
             trade["exit_reason"] = "SL"
+            exit_price = float(sl_od.get("average_price") or sl_od.get("price") or trade.get("prem_sl") or 0)
+            pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
             sound_sl()
             break
 
@@ -455,12 +477,36 @@ def monitor_orders(sym, sl_order_id, target_order_id):
                 except Exception:
                     pass
             trade["exit_reason"] = "TARGET"
+            exit_price = float(tg_od.get("average_price") or tg_od.get("price") or trade.get("prem_target") or 0)
+            pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
             sound_target()
             break
 
     if trade.get("exit_reason"):
-        msg = f"EXIT TRADE\nSymbol: {sym}\nReason: {trade['exit_reason']}\nTime: {datetime.now().strftime('%H:%M:%S')}"
-        send_telegram(msg)
+        if not printed_exit:
+            exit_label = "🎯 TARGET HIT" if trade["exit_reason"] == "TARGET" else "🛑 SL HIT"
+            exit_msg = (
+                f"{exit_label}\n"
+                f"Exit Price: {round(exit_price, 2)}\n"
+                f"Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+            print(exit_msg)
+            send_telegram(exit_msg)
+            printed_exit = True
+        if not summary_sent:
+            if trade_taken:
+                summary_msg = (
+                    "📊 TRADE SUMMARY\n"
+                    f"Entry Price: {round(entry_price or 0, 2)}\n"
+                    f"Exit Price: {round(exit_price or 0, 2)}\n"
+                    f"Quantity: {quantity}\n"
+                    f"Net P&L: {round(pnl, 2)}"
+                )
+            else:
+                summary_msg = "📊 TRADE SUMMARY\nNo Trade Taken Today"
+            print(summary_msg)
+            send_telegram(summary_msg)
+            summary_sent = True
         trade_open = False
         ORDER_PLACED = False
         ENTRY_IN_PROGRESS = False
@@ -541,7 +587,6 @@ def on_connect(ws,r):
     print("WebSocket connected")
     ws.subscribe([SPOT_TOKEN])
     ws.set_mode(ws.MODE_LTP,[SPOT_TOKEN])
-    print("WebSocket connected")
 
 def on_close(ws, c, r):
 
@@ -562,6 +607,8 @@ def on_ticks(ws, ticks):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global ORDER_PLACED, BLOCK_MSG_SHOWN, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
+    global trade_taken, entry_price, exit_price, quantity, pnl
+    global printed_entry, summary_sent
 
     now = datetime.now().time()
 
@@ -588,10 +635,28 @@ def on_ticks(ws, ticks):
             if qty > 0:
                 place_live_exit(ACTIVE_SYMBOL)
                 print(f"{RED}Position closed for day end{RESET}")
+                if exit_price is None and option_ltp is not None:
+                    exit_price = option_ltp
+                    pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
             else:
                 print("Position already closed manually") 
         else:
             print(f"{BLUE}No running trade - closing script for the day{RESET}")
+
+        if not summary_sent:
+            if trade_taken:
+                summary_msg = (
+                    "📊 TRADE SUMMARY\n"
+                    f"Entry Price: {round(entry_price or 0, 2)}\n"
+                    f"Exit Price: {round(exit_price or 0, 2)}\n"
+                    f"Quantity: {quantity}\n"
+                    f"Net P&L: {round(pnl, 2)}"
+                )
+            else:
+                summary_msg = "📊 TRADE SUMMARY\nNo Trade Taken Today"
+            print(summary_msg)
+            send_telegram(summary_msg)
+            summary_sent = True
 
         print(f"{GREEN}DAY COMPLETED{RESET}")
 
@@ -676,6 +741,7 @@ def on_ticks(ws, ticks):
 
         def run_execution(sym_local):
             global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
+            global trade_taken, entry_price, quantity, printed_entry
             with EXECUTION_LOCK:
                 oid = place_entry_order(sym_local)
                 if not oid:
@@ -702,10 +768,24 @@ def on_ticks(ws, ticks):
                 trade["target_order_id"] = tgt_id
                 trade["prem_sl"] = sl_price
                 trade["prem_target"] = tgt_price
+                trade_taken = True
+                entry_price = fill_price
+                quantity = LOT_SIZE
                 trade_open = True
                 ENTRY_IN_PROGRESS = False
                 sound_entry()
-                send_telegram(f"Premium Entry: {fill_price}\nTarget: {tgt_price}\nSL: {sl_price}")
+                if not printed_entry:
+                    entry_msg = (
+                        "🚀 ENTRY TRIGGERED\n"
+                        f"Spot Entry: {round(spot_ltp or 0, 2)}\n"
+                        f"Premium Entry: {round(fill_price, 2)}\n"
+                        f"Stop Loss: {round(sl_price, 2)}\n"
+                        f"Target: {round(tgt_price, 2)}\n"
+                        f"Quantity: {LOT_SIZE}"
+                    )
+                    print(entry_msg)
+                    send_telegram(entry_msg)
+                    printed_entry = True
                 monitor_orders(sym_local, sl_id, tgt_id)
 
         threading.Thread(target=run_execution, args=(sym,), daemon=True).start()
