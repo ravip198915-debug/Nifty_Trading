@@ -78,6 +78,8 @@ MODE="LIVE"
 PRODUCT="MIS"
 EXCHANGE="NFO"
 ORDER_TYPE="LIMIT"
+POLL_INTERVAL=0.4
+MAX_ENTRY_RETRY=6
 
 SPOT_TOKEN=256265
 LOT_SIZE=130
@@ -248,12 +250,6 @@ def fetch_spot():
         spot_ltp=kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"]
     except: pass
 
-def fetch_option_ltp():
-    global option_ltp
-    try:
-        option_ltp=list(kite.ltp([ACTIVE_OPTION_TOKEN]).values())[0]["last_price"]
-    except: pass
-
 # ================= 9:30 CANDLE =================
 def fetch_930_candle():
     global candle_done
@@ -292,68 +288,66 @@ def fetch_930_candle():
     calculate_auto_signal()
     
 
-# ⭐⭐⭐ ADD PENDING ORDER FUNCTION HERE (OUTSIDE THE ABOVE FUNCTION)
-def has_pending_order(sym):
+# ================= EXECUTION ENGINE =================
+ORDER_BOOK_CACHE = {}
+ORDER_CACHE_AT = 0.0
+EXECUTION_LOCK = threading.Lock()
+ENTRY_IN_PROGRESS = False
+trade["entry_order_id"] = None
+trade["sl_order_id"] = None
+trade["target_order_id"] = None
+trade["exit_reason"] = None
+
+OPEN_ORDER_STATUSES = {"OPEN", "TRIGGER PENDING", "PUT ORDER REQ RECEIVED", "VALIDATION PENDING"}
+
+
+def get_buffer(ltp):
+    if ltp < 50:
+        return 0.5
+    if ltp < 100:
+        return 1
+    if ltp < 200:
+        return 2
+    return 3
+
+
+def fetch_orders_cached(force=False):
+    global ORDER_BOOK_CACHE, ORDER_CACHE_AT
+    now = time.time()
+    if not force and (now - ORDER_CACHE_AT) < POLL_INTERVAL and ORDER_BOOK_CACHE:
+        return ORDER_BOOK_CACHE
     try:
         orders = kite.orders()
-        for o in orders:
-            if (
-                o["tradingsymbol"] == sym and
-                o["status"] in ["OPEN","TRIGGER PENDING","PUT ORDER REQ RECEIVED"]
-            ):
+        ORDER_BOOK_CACHE = {o["order_id"]: o for o in orders}
+        ORDER_CACHE_AT = now
+        return ORDER_BOOK_CACHE
+    except Exception:
+        return ORDER_BOOK_CACHE
+
+
+def get_order_by_id(order_id, force=False):
+    if not order_id:
+        return None
+    book = fetch_orders_cached(force=force)
+    return book.get(order_id)
+
+
+def has_pending_order(sym):
+    try:
+        for o in fetch_orders_cached(force=True).values():
+            if o["tradingsymbol"] == sym and o["status"] in OPEN_ORDER_STATUSES:
                 return True
-    except Exception as e:
-        print("Order check error:", e)
+    except Exception:
+        return False
     return False
 
 
-# ⭐⭐⭐ ADD HERE (same indentation level)
-# ================= GET LAST FILLED BUY PRICE =================
-def get_last_fill_price(sym):
+def place_entry_order(sym):
+    if option_ltp is None:
+        return None
+    price = round(option_ltp + get_buffer(option_ltp), 1)
     try:
-        orders = kite.orders()[::-1]
-        for o in orders:
-            if (
-                o["tradingsymbol"] == sym and
-                o["transaction_type"] == "BUY" and
-                o["status"] == "COMPLETE"
-            ):
-                return float(o["average_price"])
-    except Exception as e:
-        print("Fill price fetch error:", e)
-    return None
-
-
-# ================= LIVE ORDER BLOCK (SAFE VERSION) =================
-
-# Global exit lock (prevents duplicate exits from heartbeat)
-EXIT_DONE = False
-
-
-# ================= LIVE BUY ORDER =================
-def place_live_buy(sym):
-    global EXIT_DONE, option_ltp
-
-    try:
-        ltp = option_ltp
-
-        if ltp is None:
-            print("Waiting for live LTP...")
-            return
-
-        def get_buffer(ltp):
-            if ltp < 50:
-                return 0.5
-            elif ltp < 100:
-                return 1
-            elif ltp < 200:
-                return 2
-            else:
-                return 5   # 🔥 increase for high premium
-
-        price = round(ltp + get_buffer(ltp), 1)
-
-        order_id = kite.place_order(
+        return kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=EXCHANGE,
             tradingsymbol=sym,
@@ -364,11 +358,115 @@ def place_live_buy(sym):
             price=price,
             validity=kite.VALIDITY_DAY
         )
+    except Exception:
+        return None
 
-        print(f"{GREEN}SMART BUY: {sym} @ {price}{RESET}")
 
-    except Exception as e:
-        print(f"BUY ERROR: {e}")
+def modify_until_filled(sym, order_id):
+    for _ in range(MAX_ENTRY_RETRY):
+        time.sleep(POLL_INTERVAL)
+        od = get_order_by_id(order_id, force=True)
+        if not od:
+            continue
+
+        status = od.get("status")
+        if status == "COMPLETE":
+            avg_price = float(od.get("average_price") or 0)
+            if avg_price > 0:
+                return avg_price
+        if status in {"CANCELLED", "REJECTED"}:
+            return None
+
+        if status in OPEN_ORDER_STATUSES and option_ltp is not None:
+            try:
+                new_price = round(option_ltp + get_buffer(option_ltp), 1)
+                kite.modify_order(
+                    variety=kite.VARIETY_REGULAR,
+                    order_id=order_id,
+                    price=new_price,
+                    order_type=kite.ORDER_TYPE_LIMIT,
+                    validity=kite.VALIDITY_DAY
+                )
+            except Exception:
+                pass
+
+    try:
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+    except Exception:
+        pass
+    return None
+
+
+def place_sl_target(sym, entry_price):
+    sl_trigger = round(entry_price - PREM_SL_PTS, 1)
+    target_price = round(entry_price + PREM_TGT_PTS, 1)
+    try:
+        sl_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=EXCHANGE,
+            tradingsymbol=sym,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=LOT_SIZE,
+            product=PRODUCT,
+            order_type=kite.ORDER_TYPE_SLM,
+            trigger_price=sl_trigger,
+            validity=kite.VALIDITY_DAY
+        )
+        tgt_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=EXCHANGE,
+            tradingsymbol=sym,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=LOT_SIZE,
+            product=PRODUCT,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=target_price,
+            validity=kite.VALIDITY_DAY
+        )
+        return sl_id, tgt_id, sl_trigger, target_price
+    except Exception:
+        return None, None, sl_trigger, target_price
+
+
+def monitor_orders(sym, sl_order_id, target_order_id):
+    global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS, day_closed, SCRIPT_RUNNING
+    while trade_open and (sl_order_id or target_order_id):
+        time.sleep(POLL_INTERVAL)
+        sl_od = get_order_by_id(sl_order_id, force=True) if sl_order_id else None
+        tg_od = get_order_by_id(target_order_id, force=False) if target_order_id else None
+
+        sl_done = sl_od and sl_od.get("status") == "COMPLETE"
+        tg_done = tg_od and tg_od.get("status") == "COMPLETE"
+
+        if sl_done:
+            if target_order_id:
+                try:
+                    kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=target_order_id)
+                except Exception:
+                    pass
+            trade["exit_reason"] = "SL"
+            sound_sl()
+            break
+
+        if tg_done:
+            if sl_order_id:
+                try:
+                    kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=sl_order_id)
+                except Exception:
+                    pass
+            trade["exit_reason"] = "TARGET"
+            sound_target()
+            break
+
+    if trade.get("exit_reason"):
+        msg = f"EXIT TRADE\nSymbol: {sym}\nReason: {trade['exit_reason']}\nTime: {datetime.now().strftime('%H:%M:%S')}"
+        send_telegram(msg)
+        trade_open = False
+        ORDER_PLACED = False
+        ENTRY_IN_PROGRESS = False
+        day_closed = True
+        SCRIPT_RUNNING = False
+        safe_kws_stop()
 
 
 # ================= GET OPEN POSITION QTY =================
@@ -412,24 +510,16 @@ def recover_position():
 
 # ================= SAFE EXIT ORDER =================
 def place_live_exit(sym):
-    global EXIT_DONE
-
     try:
-        if EXIT_DONE:
-            print("Exit already done — skipping")
-            return
-
         qty = get_open_qty(sym)
 
-        if qty == 0:
-            print("No open position — exit skipped")
+        if not qty:
             return
 
-        # 🔥 Get latest price
-        ltp = kite.ltp([f"NFO:{sym}"])[f"NFO:{sym}"]["last_price"]
+        if option_ltp is None:
+            return
 
-        # 🔥 Slightly below for quick sell execution
-        price = round(ltp - 1, 1)
+        price = round(max(0.1, option_ltp - 1), 1)
 
         kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -443,11 +533,8 @@ def place_live_exit(sym):
             validity=kite.VALIDITY_DAY
         )
 
-        EXIT_DONE = True
-        print(f"{RED}LIMIT EXIT ORDER : {sym} @ {price}{RESET}")
-
-    except Exception as e:
-        print(f"EXIT ORDER ERROR : {e}")
+    except Exception:
+        pass
 
 # ================= WEBSOCKET =================
 def on_connect(ws,r):
@@ -473,7 +560,7 @@ def on_ticks(ws, ticks):
         ws = kws
 
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
-    global ORDER_PLACED, BLOCK_MSG_SHOWN
+    global ORDER_PLACED, BLOCK_MSG_SHOWN, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
 
     now = datetime.now().time()
@@ -580,89 +667,54 @@ def on_ticks(ws, ticks):
             print("Order already pending — skipping duplicate entry")
             return
 
+        if ENTRY_IN_PROGRESS:
+            return
+
         ORDER_PLACED = True
-        trade_open = True
+        ENTRY_IN_PROGRESS = True
         trade.clear()
 
-        place_live_buy(sym)
-        sound_entry()
+        def run_execution(sym_local):
+            global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
+            with EXECUTION_LOCK:
+                oid = place_entry_order(sym_local)
+                if not oid:
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
 
-# ===== MANAGEMENT =====
-    # ===== MANAGEMENT =====
-    if trade_open:
+                trade["entry_order_id"] = oid
+                fill_price = modify_until_filled(sym_local, oid)
+                if not fill_price:
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
 
-        fetch_option_ltp()
-        if option_ltp is None:
-            return
-
-        # ⭐ Detect manual exit (SAFE VERSION)
-        qty = get_open_qty(ACTIVE_SYMBOL)
-         
-        if qty is None:
-            return
-
-        if qty == 0:
-            print("Manual exit detected — resetting trade state")
-            trade_open = False
-            return
-
-        qty = get_open_qty(ACTIVE_SYMBOL)
-        # API failure → skip check
-        if qty is None:
-            return 
-
-        # True manual exit
-        if qty == 0:
-            print("Manual exit detected — resetting trade state")
-            trade_open = False
-            return
-
-        # ⭐ Fill-price entry logic INSIDE trade_open
-        if "prem_entry" not in trade:
-
-            fill_price = get_last_fill_price(ACTIVE_SYMBOL)
-
-            if fill_price:
                 trade["prem_entry"] = fill_price
-            else:
-                trade["prem_entry"] = option_ltp
+                sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
+                if not sl_id or not tgt_id:
+                    place_live_exit(sym_local)
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
 
-            trade["prem_sl"] = round(trade["prem_entry"] - PREM_SL_PTS,2)
-            trade["prem_target"] = round(trade["prem_entry"] + PREM_TGT_PTS,2)
+                trade["sl_order_id"] = sl_id
+                trade["target_order_id"] = tgt_id
+                trade["prem_sl"] = sl_price
+                trade["prem_target"] = tgt_price
+                trade_open = True
+                ENTRY_IN_PROGRESS = False
+                sound_entry()
+                send_telegram(f"Premium Entry: {fill_price}\nTarget: {tgt_price}\nSL: {sl_price}")
+                monitor_orders(sym_local, sl_id, tgt_id)
 
-            print(f"Premium Entry (FILLED): {trade['prem_entry']}")
-            print(f"Target : {trade['prem_target']} | SL : {trade['prem_sl']}")
+        threading.Thread(target=run_execution, args=(sym,), daemon=True).start()
 
-            msg = f"""Premium Entry: {trade['prem_entry']}
-            Target: {trade['prem_target']}
-            SL: {trade['prem_sl']}"""
-            send_telegram(msg)
-            return
-
-        if option_ltp <= trade["prem_sl"]:
-            reason = "SL"
-            sound_sl()
-
-        elif option_ltp >= trade["prem_target"]:
-            reason = "TARGET"
-            sound_target()
-
-        else:
-            return
-
-        place_live_exit(ACTIVE_SYMBOL)
-        print(f"Exit Trade - {reason}")
-   
-        msg = f"""EXIT TRADE
-        Symbol: {ACTIVE_SYMBOL}
-        Reason: {reason}
-        Time: {datetime.now().strftime('%H:%M:%S')}"""
-        send_telegram(msg)
-
-        day_closed = True
-        SCRIPT_RUNNING = False
-        safe_kws_stop()
-        return
+    if trade_open:
+        qty = get_open_qty(ACTIVE_SYMBOL)
+        if qty == 0:
+            trade_open = False
+            ORDER_PLACED = False
 
 # ⭐⭐⭐ ADD HERE ⭐⭐⭐
 
