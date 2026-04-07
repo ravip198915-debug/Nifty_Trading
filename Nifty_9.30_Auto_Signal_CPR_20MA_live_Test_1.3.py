@@ -122,6 +122,9 @@ entry_price = None
 exit_price = None
 quantity = 0
 pnl = 0
+day_pnl = 0
+DAILY_LOSS_LIMIT = -2500
+MAX_SLIPPAGE = 5
 
 candle = {"high": None, "low": None}
 candle_done=False
@@ -261,8 +264,14 @@ def get_atm_option(spot,side):
 def fetch_spot():
     global spot_ltp
     try:
-        spot_ltp = kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"]
-    except: pass
+        data = kite.ltp(["NSE:NIFTY 50"])
+        if "NSE:NIFTY 50" in data:
+            spot_ltp = data["NSE:NIFTY 50"]["last_price"]
+        else:
+            return
+    except Exception as e:
+        print("Spot fetch error:", e)
+        return
 
 # ================= 9:30 CANDLE =================
 def fetch_930_candle():
@@ -292,6 +301,14 @@ def fetch_930_candle():
 
     candle["high"] = data[0]["high"]
     candle["low"] = data[0]["low"]
+
+    if candle["high"] is None or candle["low"] is None:
+        return
+
+    if candle["high"] <= 0 or candle["low"] <= 0:
+        print("Invalid candle values — skipping trade")
+        return
+
     candle_done = True
 
     if not printed_930:
@@ -453,7 +470,7 @@ def place_sl_target(sym, entry_price):
 
 def monitor_orders(sym, sl_order_id, target_order_id):
     global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS, day_closed, SCRIPT_RUNNING
-    global printed_exit, exit_price, pnl, entry_price, quantity
+    global printed_exit, exit_price, pnl, entry_price, quantity, day_pnl
     global summary_sent, trade_taken
     while trade_open and (sl_order_id or target_order_id):
         time.sleep(POLL_INTERVAL)
@@ -472,6 +489,17 @@ def monitor_orders(sym, sl_order_id, target_order_id):
             trade["exit_reason"] = "SL"
             exit_price = float(sl_od.get("average_price") or sl_od.get("price") or trade.get("prem_sl") or 0)
             pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
+            day_pnl += pnl
+            if day_pnl <= DAILY_LOSS_LIMIT:
+                print("🚫 DAILY LOSS LIMIT HIT — STOPPING TRADING")
+                send_telegram("🚫 DAILY LOSS LIMIT HIT — BOT STOPPED")
+                trade_open = False
+                ORDER_PLACED = False
+                ENTRY_IN_PROGRESS = False
+                day_closed = True
+                SCRIPT_RUNNING = False
+                safe_kws_stop()
+                return
             sound_sl()
             break
 
@@ -484,6 +512,17 @@ def monitor_orders(sym, sl_order_id, target_order_id):
             trade["exit_reason"] = "TARGET"
             exit_price = float(tg_od.get("average_price") or tg_od.get("price") or trade.get("prem_target") or 0)
             pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
+            day_pnl += pnl
+            if day_pnl <= DAILY_LOSS_LIMIT:
+                print("🚫 DAILY LOSS LIMIT HIT — STOPPING TRADING")
+                send_telegram("🚫 DAILY LOSS LIMIT HIT — BOT STOPPED")
+                trade_open = False
+                ORDER_PLACED = False
+                ENTRY_IN_PROGRESS = False
+                day_closed = True
+                SCRIPT_RUNNING = False
+                safe_kws_stop()
+                return
             sound_target()
             break
 
@@ -677,6 +716,19 @@ def on_ticks(ws, ticks):
     # ===== ENTRY =====
     if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
 
+        if candle["high"] is None or candle["low"] is None:
+            return
+
+        if candle["high"] <= 0 or candle["low"] <= 0:
+            print("Invalid candle values — skipping trade")
+            return
+
+        if spot_ltp is None:
+            return
+
+        if day_pnl <= DAILY_LOSS_LIMIT:
+            return
+
         #⭐ AUTO SIGNAL LOCK (ADD THIS)
         if not AUTO_READY:
             return
@@ -751,8 +803,22 @@ def on_ticks(ws, ticks):
 
         def run_execution(sym_local):
             global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
-            global trade_taken, breakout_done, entry_price, quantity, printed_entry
+            global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp
             with EXECUTION_LOCK:
+                if option_ltp is None or option_ltp <= 0:
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
+
+                entry_reference_price = option_ltp
+
+                if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
+                    print("⚠️ Slippage too high — skipping trade")
+                    send_telegram("⚠️ Slippage too high — trade skipped")
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
+
                 oid = place_entry_order(sym_local)
                 if not oid:
                     ORDER_PLACED = False
@@ -762,6 +828,14 @@ def on_ticks(ws, ticks):
                 trade["entry_order_id"] = oid
                 fill_price = modify_until_filled(sym_local, oid)
                 if not fill_price:
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    return
+
+                if abs(fill_price - entry_reference_price) > MAX_SLIPPAGE:
+                    print("⚠️ High slippage after fill — exiting trade")
+                    send_telegram("⚠️ High slippage exit triggered")
+                    place_live_exit(sym_local)
                     ORDER_PLACED = False
                     ENTRY_IN_PROGRESS = False
                     return
