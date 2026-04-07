@@ -117,6 +117,7 @@ AUTO_READY = False
 trade={}
 day_closed=False
 trade_taken = False
+breakout_done = False
 entry_price = None
 exit_price = None
 quantity = 0
@@ -189,12 +190,12 @@ def calculate_auto_signal():
 
     cpr_width = abs(TC - BC) / pivot * 100
 
-    if cpr_width >= 0.6:
-        CPR_TYPE = "WIDE"
-    elif cpr_width <= 0.15:
+    if cpr_width <= 0.2:
         CPR_TYPE = "NARROW"
-    else:
+    elif cpr_width <= 0.4:
         CPR_TYPE = "NORMAL"
+    else:
+        CPR_TYPE = "WIDE"
 
     # ================= MA20 =================
     closes = [i["close"] for i in hist[:-1]]   # exclude today
@@ -203,19 +204,23 @@ def calculate_auto_signal():
     MA_SIDE = "Above" if PDC > ma20 else "Below"
 
     # ================= AUTO SIGNAL =================
-    if CPR_TYPE != "WIDE":
+    AUTO_SIGNAL = "NO TRADE"
+    allowed_side = None
 
-        if MA_SIDE == "Above":
+    if cpr_width < 0.2:
+        if PDC > ma20 and PDC > TC:
             AUTO_SIGNAL = "CE BUY DAY"
             allowed_side = "CE"
-        else:
+        elif PDC < ma20 and PDC < BC:
             AUTO_SIGNAL = "PE BUY DAY"
             allowed_side = "PE"
-
+        else:
+            AUTO_SIGNAL = "NO TRADE"
     else:
         AUTO_SIGNAL = "NO TRADE"
 
-        # ⭐ Reverse logic for NO TRADE DAY
+    # Reverse logic for NO TRADE DAY
+    if AUTO_SIGNAL == "NO TRADE":
         if MA_SIDE == "Above":
             allowed_side = "PE"
         else:
@@ -290,8 +295,8 @@ def fetch_930_candle():
     candle_done = True
 
     if not printed_930:
-        high_buffer = candle["high"] + 1
-        low_buffer = candle["low"] - 1
+        high_buffer = candle["high"] + 3
+        low_buffer = candle["low"] - 3
         levels_msg = (
             "📊 9:30 LEVELS\n"
             f"High: {candle['high']}\n"
@@ -607,7 +612,7 @@ def on_ticks(ws, ticks):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global ORDER_PLACED, BLOCK_MSG_SHOWN, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
-    global trade_taken, entry_price, exit_price, quantity, pnl
+    global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, summary_sent
 
     now = datetime.now().time()
@@ -676,6 +681,11 @@ def on_ticks(ws, ticks):
         if not AUTO_READY:
             return
 
+        if trade_taken:
+            return
+
+        if breakout_done:
+            return
 
         if CPR_TYPE == "WIDE":
            return
@@ -685,7 +695,7 @@ def on_ticks(ws, ticks):
 
         side = None
 
-        if spot_ltp >= candle["high"] + 1:
+        if spot_ltp >= candle["high"] + 3:
             if allowed_side == "CE":
                 side = "CE"
                 BLOCK_MSG_SHOWN = False
@@ -695,7 +705,7 @@ def on_ticks(ws, ticks):
                     BLOCK_MSG_SHOWN = True
                 return
 
-        elif spot_ltp <= candle["low"] - 1:
+        elif spot_ltp <= candle["low"] - 3:
             if allowed_side == "PE":
                 side = "PE"
                 BLOCK_MSG_SHOWN = False
@@ -741,7 +751,7 @@ def on_ticks(ws, ticks):
 
         def run_execution(sym_local):
             global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
-            global trade_taken, entry_price, quantity, printed_entry
+            global trade_taken, breakout_done, entry_price, quantity, printed_entry
             with EXECUTION_LOCK:
                 oid = place_entry_order(sym_local)
                 if not oid:
@@ -769,6 +779,7 @@ def on_ticks(ws, ticks):
                 trade["prem_sl"] = sl_price
                 trade["prem_target"] = tgt_price
                 trade_taken = True
+                breakout_done = True
                 entry_price = fill_price
                 quantity = LOT_SIZE
                 trade_open = True
