@@ -123,7 +123,7 @@ exit_price = None
 quantity = 0
 pnl = 0
 
-candle={"high":None,"low":None}
+candle = {"high": None, "low": None}
 candle_done=False
 
 # ================= KITE =================
@@ -261,7 +261,7 @@ def get_atm_option(spot,side):
 def fetch_spot():
     global spot_ltp
     try:
-        spot_ltp=kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"]
+        spot_ltp = kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"]
     except: pass
 
 # ================= 9:30 CANDLE =================
