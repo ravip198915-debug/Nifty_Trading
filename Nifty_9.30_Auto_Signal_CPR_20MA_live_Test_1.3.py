@@ -439,6 +439,7 @@ def modify_until_filled(sym, order_id):
 
 def place_sl_target(sym, entry_price):
     sl_trigger = round(entry_price - PREM_SL_PTS, 1)
+    sl_price = round(sl_trigger - 1, 1)
     target_price = round(entry_price + PREM_TGT_PTS, 1)
     try:
         sl_id = kite.place_order(
@@ -448,7 +449,8 @@ def place_sl_target(sym, entry_price):
             transaction_type=kite.TRANSACTION_TYPE_SELL,
             quantity=LOT_SIZE,
             product=PRODUCT,
-            order_type=kite.ORDER_TYPE_SLM,
+            order_type=kite.ORDER_TYPE_SL,
+            price=sl_price,
             trigger_price=sl_trigger,
             validity=kite.VALIDITY_DAY
         )
@@ -715,6 +717,8 @@ def on_ticks(ws, ticks):
 
     # ===== ENTRY =====
     if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
+        if trade_taken or day_closed:
+            return
 
         if candle["high"] is None or candle["low"] is None:
             return
@@ -878,8 +882,11 @@ def on_ticks(ws, ticks):
     if trade_open:
         qty = get_open_qty(ACTIVE_SYMBOL)
         if qty == 0:
-            trade_open = False
-            ORDER_PLACED = False
+            if trade.get("exit_reason"):
+                trade_open = False
+                ORDER_PLACED = False
+            else:
+                return
 
 # ⭐⭐⭐ ADD HERE ⭐⭐⭐
 
