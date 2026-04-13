@@ -103,6 +103,7 @@ BLOCK_MSG_SHOWN=False
 day_closed = False
 SCRIPT_RUNNING = True
 WS_STOPPED = False
+LAST_TICK_TIME = time.time()
 printed_930 = False
 printed_entry = False
 printed_exit = False
@@ -645,260 +646,269 @@ def on_close(ws, c, r):
 
 # ================= CORE ENGINE =================
 def on_ticks(ws, ticks):
-
-    # ⭐ ADD THIS LINE HERE (FIRST THING INSIDE FUNCTION)
-    if ws is None:
-        ws = kws
-
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global ORDER_PLACED, BLOCK_MSG_SHOWN, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
-    global printed_entry, summary_sent
+    global printed_entry, summary_sent, LAST_TICK_TIME
+    try:
+        if WS_STOPPED or not SCRIPT_RUNNING:
+            return
 
-    now = datetime.now().time()
+        LAST_TICK_TIME = time.time()
 
-    # ===== UPDATE LTP =====
-    for t in ticks:
-        if "last_price" in t:
-            spot_ltp = t["last_price"]
-        if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
-            option_ltp = t["last_price"]
+        if ws is None:
+            ws = kws
 
-    if not candle_done or day_closed:
-        return
+        now = datetime.now().time()
 
+        # ===== UPDATE LTP =====
+        for t in ticks:
+            if "last_price" in t:
+                spot_ltp = t["last_price"]
+            if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
+                option_ltp = t["last_price"]
+
+        if not candle_done or day_closed:
+            return
+
+        # ===== UNIVERSAL DAY CLOSE (3:20 PM) =====
     # ===== UNIVERSAL DAY CLOSE (3:20 PM) =====
-# ===== UNIVERSAL DAY CLOSE (3:20 PM) =====
-    if now >= FORCE_EXIT_TIME and not day_closed:
+        if now >= FORCE_EXIT_TIME and not day_closed:
 
-        print(f"{RED}3:20 PM DAY CLOSE TRIGGERED{RESET}")
+            print(f"{RED}3:20 PM DAY CLOSE TRIGGERED{RESET}")
 
-        if trade_open and ACTIVE_SYMBOL:
-            print(f"{YELLOW}Closing active trade...{RESET}")
+            if trade_open and ACTIVE_SYMBOL:
+                print(f"{YELLOW}Closing active trade...{RESET}")
 
-            qty = get_open_qty(ACTIVE_SYMBOL)
-            if qty > 0:
-                place_live_exit(ACTIVE_SYMBOL)
-                print(f"{RED}Position closed for day end{RESET}")
-                if exit_price is None and option_ltp is not None:
-                    exit_price = option_ltp
-                    pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
+                qty = get_open_qty(ACTIVE_SYMBOL)
+                if qty > 0:
+                    place_live_exit(ACTIVE_SYMBOL)
+                    print(f"{RED}Position closed for day end{RESET}")
+                    if exit_price is None and option_ltp is not None:
+                        exit_price = option_ltp
+                        pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
+                else:
+                    print("Position already closed manually") 
             else:
-                print("Position already closed manually") 
-        else:
-            print(f"{BLUE}No running trade - closing script for the day{RESET}")
+                print(f"{BLUE}No running trade - closing script for the day{RESET}")
 
-        if not summary_sent:
-            if trade_taken:
-                summary_msg = (
-                    "📊 TRADE SUMMARY\n"
-                    f"Entry Price: {round(entry_price or 0, 2)}\n"
-                    f"Exit Price: {round(exit_price or 0, 2)}\n"
-                    f"Quantity: {quantity}\n"
-                    f"Net P&L: {round(pnl, 2)}"
-                )
-            else:
-                summary_msg = "📊 TRADE SUMMARY\nNo Trade Taken Today"
-            print(summary_msg)
-            send_telegram(summary_msg)
-            summary_sent = True
-
-        print(f"{GREEN}DAY COMPLETED{RESET}")
-
-        send_telegram("DAY COMPLETED")
-
-        day_closed = True
-        globals()["SCRIPT_RUNNING"] = False
-
-        safe_kws_stop()        # ⭐ IMPORTANT (use stop, not close)
-        return
-
-
-    # ===== ENTRY =====
-    if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
-        if trade_taken or day_closed:
-            return
-
-        if candle["high"] is None or candle["low"] is None:
-            return
-
-        if candle["high"] <= 0 or candle["low"] <= 0:
-            print("Invalid candle values — skipping trade")
-            return
-
-        if spot_ltp is None:
-            return
-
-        if day_pnl <= DAILY_LOSS_LIMIT:
-            return
-
-        #⭐ AUTO SIGNAL LOCK (ADD THIS)
-        if not AUTO_READY:
-            return
-
-        if trade_taken:
-            return
-
-        if breakout_done:
-            return
-
-        if CPR_TYPE == "WIDE":
-           return
-
-        if allowed_side is None:
-            return
-
-        side = None
-
-        if spot_ltp >= candle["high"] + 3:
-            if allowed_side == "CE":
-                side = "CE"
-                BLOCK_MSG_SHOWN = False
-            else:
-                if not BLOCK_MSG_SHOWN:
-                    print(f"{YELLOW}ENTRY BLOCKED – CE not allowed{RESET}")
-                    BLOCK_MSG_SHOWN = True
-                return
-
-        elif spot_ltp <= candle["low"] - 3:
-            if allowed_side == "PE":
-                side = "PE"
-                BLOCK_MSG_SHOWN = False
-            else:
-                if not BLOCK_MSG_SHOWN:
-                    print(f"{YELLOW}ENTRY BLOCKED – PE not allowed{RESET}")
-                    BLOCK_MSG_SHOWN = True
-                return
-        else:
-            return
-
-        sym, tok = get_atm_option(spot_ltp, side)
-
-        ACTIVE_OPTION_TOKEN = tok
-        ACTIVE_SYMBOL = sym
-        # ⭐ ADD THIS SAFETY CHECK HERE
-        if ACTIVE_SYMBOL is None:
-           print("ATM option not found — skipping entry")
-           return
-
-        # ⭐ POSITION SAFETY (ADD THIS)
-        if get_open_qty(sym) > 0:
-            print("Position already exists — skipping entry")
-            return
-
-        if ws:
-            ws.subscribe([tok])
-            ws.set_mode(ws.MODE_LTP, [tok])
-
-        print(f"{BLUE}Trade Executed Date: {date.today()} | {datetime.now().strftime('%H:%M:%S')}{RESET}")
-   
-        # ⭐ Pending order protection
-        if has_pending_order(sym):
-            print("Order already pending — skipping duplicate entry")
-            return
-
-        if ENTRY_IN_PROGRESS:
-            return
-
-        ORDER_PLACED = True
-        ENTRY_IN_PROGRESS = True
-        trade.clear()
-
-        def run_execution(sym_local):
-            global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
-            global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp
-            with EXECUTION_LOCK:
-                if option_ltp is None or option_ltp <= 0:
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                entry_reference_price = option_ltp
-
-                if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
-                    print("⚠️ Slippage too high — skipping trade")
-                    send_telegram("⚠️ Slippage too high — trade skipped")
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                oid = place_entry_order(sym_local)
-                if not oid:
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                trade["entry_order_id"] = oid
-                fill_price = modify_until_filled(sym_local, oid)
-                if not fill_price:
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                if abs(fill_price - entry_reference_price) > MAX_SLIPPAGE:
-                    print("⚠️ High slippage after fill — exiting trade")
-                    send_telegram("⚠️ High slippage exit triggered")
-                    place_live_exit(sym_local)
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                trade["prem_entry"] = fill_price
-                sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
-                if not sl_id or not tgt_id:
-                    place_live_exit(sym_local)
-                    ORDER_PLACED = False
-                    ENTRY_IN_PROGRESS = False
-                    return
-
-                trade["sl_order_id"] = sl_id
-                trade["target_order_id"] = tgt_id
-                trade["prem_sl"] = sl_price
-                trade["prem_target"] = tgt_price
-                trade_taken = True
-                breakout_done = True
-                entry_price = fill_price
-                quantity = LOT_SIZE
-                trade_open = True
-                ENTRY_IN_PROGRESS = False
-                sound_entry()
-                if not printed_entry:
-                    entry_msg = (
-                        "🚀 ENTRY TRIGGERED\n"
-                        f"Spot Entry: {round(spot_ltp or 0, 2)}\n"
-                        f"Premium Entry: {round(fill_price, 2)}\n"
-                        f"Stop Loss: {round(sl_price, 2)}\n"
-                        f"Target: {round(tgt_price, 2)}\n"
-                        f"Quantity: {LOT_SIZE}"
+            if not summary_sent:
+                if trade_taken:
+                    summary_msg = (
+                        "📊 TRADE SUMMARY\n"
+                        f"Entry Price: {round(entry_price or 0, 2)}\n"
+                        f"Exit Price: {round(exit_price or 0, 2)}\n"
+                        f"Quantity: {quantity}\n"
+                        f"Net P&L: {round(pnl, 2)}"
                     )
-                    print(entry_msg)
-                    send_telegram(entry_msg)
-                    printed_entry = True
-                monitor_orders(sym_local, sl_id, tgt_id)
+                else:
+                    summary_msg = "📊 TRADE SUMMARY\nNo Trade Taken Today"
+                print(summary_msg)
+                send_telegram(summary_msg)
+                summary_sent = True
 
-        threading.Thread(target=run_execution, args=(sym,), daemon=True).start()
+            print(f"{GREEN}DAY COMPLETED{RESET}")
 
-    if trade_open:
-        qty = get_open_qty(ACTIVE_SYMBOL)
-        if qty == 0:
-            if trade.get("exit_reason"):
-                trade_open = False
-                ORDER_PLACED = False
+            send_telegram("DAY COMPLETED")
+
+            day_closed = True
+            globals()["SCRIPT_RUNNING"] = False
+
+            safe_kws_stop()
+            return
+
+
+        # ===== ENTRY =====
+        if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
+            if trade_taken or day_closed:
+                return
+
+            if candle["high"] is None or candle["low"] is None:
+                return
+
+            if candle["high"] <= 0 or candle["low"] <= 0:
+                print("Invalid candle values — skipping trade")
+                return
+
+            if spot_ltp is None:
+                return
+
+            if day_pnl <= DAILY_LOSS_LIMIT:
+                return
+
+            #⭐ AUTO SIGNAL LOCK (ADD THIS)
+            if not AUTO_READY:
+                return
+
+            if trade_taken:
+                return
+
+            if breakout_done:
+                return
+
+            if CPR_TYPE == "WIDE":
+               return
+
+            if allowed_side is None:
+                return
+
+            side = None
+
+            if spot_ltp >= candle["high"] + 3:
+                if allowed_side == "CE":
+                    side = "CE"
+                    BLOCK_MSG_SHOWN = False
+                else:
+                    if not BLOCK_MSG_SHOWN:
+                        print(f"{YELLOW}ENTRY BLOCKED – CE not allowed{RESET}")
+                        BLOCK_MSG_SHOWN = True
+                    return
+
+            elif spot_ltp <= candle["low"] - 3:
+                if allowed_side == "PE":
+                    side = "PE"
+                    BLOCK_MSG_SHOWN = False
+                else:
+                    if not BLOCK_MSG_SHOWN:
+                        print(f"{YELLOW}ENTRY BLOCKED – PE not allowed{RESET}")
+                        BLOCK_MSG_SHOWN = True
+                    return
             else:
                 return
+
+            sym, tok = get_atm_option(spot_ltp, side)
+
+            ACTIVE_OPTION_TOKEN = tok
+            ACTIVE_SYMBOL = sym
+            # ⭐ ADD THIS SAFETY CHECK HERE
+            if ACTIVE_SYMBOL is None:
+               print("ATM option not found — skipping entry")
+               return
+
+            # ⭐ POSITION SAFETY (ADD THIS)
+            if get_open_qty(sym) > 0:
+                print("Position already exists — skipping entry")
+                return
+
+            if ws:
+                ws.subscribe([tok])
+                ws.set_mode(ws.MODE_LTP, [tok])
+
+            print(f"{BLUE}Trade Executed Date: {date.today()} | {datetime.now().strftime('%H:%M:%S')}{RESET}")
+   
+            # ⭐ Pending order protection
+            if has_pending_order(sym):
+                print("Order already pending — skipping duplicate entry")
+                return
+
+            if ENTRY_IN_PROGRESS:
+                return
+
+            ORDER_PLACED = True
+            ENTRY_IN_PROGRESS = True
+            trade.clear()
+
+            def run_execution(sym_local):
+                global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
+                global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp
+                with EXECUTION_LOCK:
+                    if option_ltp is None or option_ltp <= 0:
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    entry_reference_price = option_ltp
+
+                    if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
+                        print("⚠️ Slippage too high — skipping trade")
+                        send_telegram("⚠️ Slippage too high — trade skipped")
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    oid = place_entry_order(sym_local)
+                    if not oid:
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    trade["entry_order_id"] = oid
+                    fill_price = modify_until_filled(sym_local, oid)
+                    if not fill_price:
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    if abs(fill_price - entry_reference_price) > MAX_SLIPPAGE:
+                        print("⚠️ High slippage after fill — exiting trade")
+                        send_telegram("⚠️ High slippage exit triggered")
+                        place_live_exit(sym_local)
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    trade["prem_entry"] = fill_price
+                    sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
+                    if not sl_id or not tgt_id:
+                        place_live_exit(sym_local)
+                        ORDER_PLACED = False
+                        ENTRY_IN_PROGRESS = False
+                        return
+
+                    trade["sl_order_id"] = sl_id
+                    trade["target_order_id"] = tgt_id
+                    trade["prem_sl"] = sl_price
+                    trade["prem_target"] = tgt_price
+                    trade_taken = True
+                    breakout_done = True
+                    entry_price = fill_price
+                    quantity = LOT_SIZE
+                    trade_open = True
+                    ENTRY_IN_PROGRESS = False
+                    sound_entry()
+                    if not printed_entry:
+                        entry_msg = (
+                            "🚀 ENTRY TRIGGERED\n"
+                            f"Spot Entry: {round(spot_ltp or 0, 2)}\n"
+                            f"Premium Entry: {round(fill_price, 2)}\n"
+                            f"Stop Loss: {round(sl_price, 2)}\n"
+                            f"Target: {round(tgt_price, 2)}\n"
+                            f"Quantity: {LOT_SIZE}"
+                        )
+                        print(entry_msg)
+                        send_telegram(entry_msg)
+                        printed_entry = True
+                    monitor_orders(sym_local, sl_id, tgt_id)
+
+            threading.Thread(target=run_execution, args=(sym,), daemon=True).start()
+
+        if trade_open:
+            qty = get_open_qty(ACTIVE_SYMBOL)
+            if qty == 0:
+                if trade.get("exit_reason"):
+                    trade_open = False
+                    ORDER_PLACED = False
+                else:
+                    return
+
+    except Exception as e:
+        print("on_ticks error:", e)
 
 # ⭐⭐⭐ ADD HERE ⭐⭐⭐
 
 def safe_kws_stop():
-    global WS_STOPPED
+    global WS_STOPPED, SCRIPT_RUNNING
     if WS_STOPPED:
         return
-    try:
-        kws.stop()
-    except:
-        pass
     WS_STOPPED = True
+    SCRIPT_RUNNING = False
+    try:
+        time.sleep(0.5)
+        kws.close()
+        print("WebSocket safely closed")
+    except Exception as e:
+        print("KWS stop error:", e)
 
 # ================= START =================
 
@@ -917,9 +927,16 @@ kws.connect(threaded=True)
 def heartbeat():
 
     while SCRIPT_RUNNING:
+        if WS_STOPPED:
+            break
 
         # Fetch spot price
         fetch_spot()
+
+        if time.time() - LAST_TICK_TIME > 10:
+            print("⚠️ WebSocket stalled — restarting safely")
+            safe_kws_stop()
+            break
 
         # Fetch 9:30 candle once
         if not candle_done and datetime.now().time() > dtime(9,35):
