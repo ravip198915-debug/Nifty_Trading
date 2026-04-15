@@ -79,7 +79,6 @@ PRODUCT="MIS"
 EXCHANGE="NFO"
 ORDER_TYPE="LIMIT"
 POLL_INTERVAL=0.4
-MAX_ENTRY_RETRY=6
 
 SPOT_TOKEN=256265
 LOT_SIZE=130
@@ -100,6 +99,7 @@ ACTIVE_OPTION_TOKEN=None
 ACTIVE_SYMBOL=None
 ORDER_PLACED=False
 BLOCK_MSG_SHOWN=False
+LAST_BLOCK_REASON=None
 day_closed = False
 SCRIPT_RUNNING = True
 WS_STOPPED = False
@@ -254,12 +254,40 @@ def get_next_expiry():
 
 
 def get_atm_option(spot,side):
-    strike=round(spot/50)*50
-    expiry=get_next_expiry()
+    """
+    Return ATM option for next weekly expiry.
+    Fixes:
+    1) Never crash callers due to None unpacking.
+    2) If exact strike is missing, choose nearest available strike.
+    3) Return None only when no instruments exist for requested side/expiry.
+    """
+    if spot is None:
+        print("ATM lookup skipped: spot is None")
+        return None
+
+    strike = round(spot / 50) * 50
+    expiry = get_next_expiry()
     print(f"{YELLOW}Using NEXT WEEK Expiry: {expiry}{RESET}")
-    for i in INSTRUMENTS:
-        if i["name"]=="NIFTY" and i["expiry"]==expiry and i["strike"]==strike and i["instrument_type"]==side:
-            return i["tradingsymbol"],i["instrument_token"]
+
+    candidates = [
+        i for i in INSTRUMENTS
+        if i["name"] == "NIFTY" and i["expiry"] == expiry and i["instrument_type"] == side
+    ]
+
+    if not candidates:
+        print(f"ATM lookup failed: no {side} instruments for expiry {expiry}")
+        return None
+
+    exact = next((i for i in candidates if i["strike"] == strike), None)
+    if exact:
+        return exact["tradingsymbol"], exact["instrument_token"]
+
+    nearest = min(candidates, key=lambda x: abs(x["strike"] - strike))
+    print(
+        f"{YELLOW}Exact strike {strike} not found. "
+        f"Using nearest strike {nearest['strike']} ({nearest['tradingsymbol']}){RESET}"
+    )
+    return nearest["tradingsymbol"], nearest["instrument_token"]
 
 # ================= FETCH =================
 def fetch_spot():
@@ -403,45 +431,32 @@ def place_entry_order(sym):
         return None
 
 
-def modify_until_filled(sym, order_id):
-    for _ in range(MAX_ENTRY_RETRY):
+def wait_for_order_complete(order_id, timeout_sec=20):
+    """
+    Wait for order completion without any modify/retry loops.
+    Returns (fill_price, status) where fill_price is None on failure.
+    """
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
         time.sleep(POLL_INTERVAL)
         od = get_order_by_id(order_id, force=True)
         if not od:
             continue
-
         status = od.get("status")
         if status == "COMPLETE":
             avg_price = float(od.get("average_price") or 0)
-            if avg_price > 0:
-                return avg_price
+            return (avg_price if avg_price > 0 else None), status
         if status in {"CANCELLED", "REJECTED"}:
-            return None
-
-        if status in OPEN_ORDER_STATUSES and option_ltp is not None:
-            try:
-                new_price = round(option_ltp + get_buffer(option_ltp), 1)
-                kite.modify_order(
-                    variety=kite.VARIETY_REGULAR,
-                    order_id=order_id,
-                    price=new_price,
-                    order_type=kite.ORDER_TYPE_LIMIT,
-                    validity=kite.VALIDITY_DAY
-                )
-            except Exception:
-                pass
-
-    try:
-        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
-    except Exception:
-        pass
-    return None
+            return None, status
+    return None, "TIMEOUT"
 
 
 def place_sl_target(sym, entry_price):
+    # SL-M mandatory: only trigger price, no limit SL price.
     sl_trigger = round(entry_price - PREM_SL_PTS, 1)
-    sl_price = round(sl_trigger - 1, 1)
     target_price = round(entry_price + PREM_TGT_PTS, 1)
+    sl_id = None
+    tgt_id = None
     try:
         sl_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -450,11 +465,15 @@ def place_sl_target(sym, entry_price):
             transaction_type=kite.TRANSACTION_TYPE_SELL,
             quantity=LOT_SIZE,
             product=PRODUCT,
-            order_type=kite.ORDER_TYPE_SL,
-            price=sl_price,
+            order_type=kite.ORDER_TYPE_SLM,
             trigger_price=sl_trigger,
             validity=kite.VALIDITY_DAY
         )
+    except Exception as e:
+        print(f"SL-M placement failed: {e}")
+        return None, None, sl_trigger, target_price
+
+    try:
         tgt_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
             exchange=EXCHANGE,
@@ -466,9 +485,16 @@ def place_sl_target(sym, entry_price):
             price=target_price,
             validity=kite.VALIDITY_DAY
         )
-        return sl_id, tgt_id, sl_trigger, target_price
-    except Exception:
+    except Exception as e:
+        print(f"Target placement failed: {e}")
+        # If target fails after SL is placed, cancel SL before force exit.
+        try:
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=sl_id)
+        except Exception:
+            pass
         return None, None, sl_trigger, target_price
+
+    return sl_id, tgt_id, sl_trigger, target_price
 
 
 def monitor_orders(sym, sl_order_id, target_order_id):
@@ -647,7 +673,7 @@ def on_close(ws, c, r):
 # ================= CORE ENGINE =================
 def on_ticks(ws, ticks):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
-    global ORDER_PLACED, BLOCK_MSG_SHOWN, ENTRY_IN_PROGRESS
+    global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, summary_sent, LAST_TICK_TIME
@@ -759,32 +785,35 @@ def on_ticks(ws, ticks):
                 if allowed_side == "CE":
                     side = "CE"
                     BLOCK_MSG_SHOWN = False
+                    LAST_BLOCK_REASON = None
                 else:
-                    if not BLOCK_MSG_SHOWN:
+                    if LAST_BLOCK_REASON != "CE_NOT_ALLOWED":
                         print(f"{YELLOW}ENTRY BLOCKED – CE not allowed{RESET}")
                         BLOCK_MSG_SHOWN = True
+                        LAST_BLOCK_REASON = "CE_NOT_ALLOWED"
                     return
 
             elif spot_ltp <= candle["low"] - 3:
                 if allowed_side == "PE":
                     side = "PE"
                     BLOCK_MSG_SHOWN = False
+                    LAST_BLOCK_REASON = None
                 else:
-                    if not BLOCK_MSG_SHOWN:
+                    if LAST_BLOCK_REASON != "PE_NOT_ALLOWED":
                         print(f"{YELLOW}ENTRY BLOCKED – PE not allowed{RESET}")
                         BLOCK_MSG_SHOWN = True
+                        LAST_BLOCK_REASON = "PE_NOT_ALLOWED"
                     return
             else:
                 return
 
-            sym, tok = get_atm_option(spot_ltp, side)
-
+            atm = get_atm_option(spot_ltp, side)
+            if not atm:
+                print("ATM option not found — skipping entry safely")
+                return
+            sym, tok = atm
             ACTIVE_OPTION_TOKEN = tok
             ACTIVE_SYMBOL = sym
-            # ⭐ ADD THIS SAFETY CHECK HERE
-            if ACTIVE_SYMBOL is None:
-               print("ATM option not found — skipping entry")
-               return
 
             # ⭐ POSITION SAFETY (ADD THIS)
             if get_open_qty(sym) > 0:
@@ -834,8 +863,9 @@ def on_ticks(ws, ticks):
                         return
 
                     trade["entry_order_id"] = oid
-                    fill_price = modify_until_filled(sym_local, oid)
+                    fill_price, entry_status = wait_for_order_complete(oid, timeout_sec=20)
                     if not fill_price:
+                        print(f"Entry order did not complete. Status: {entry_status}")
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -851,6 +881,7 @@ def on_ticks(ws, ticks):
                     trade["prem_entry"] = fill_price
                     sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
                     if not sl_id or not tgt_id:
+                        print("SL/Target placement failed — exiting position immediately")
                         place_live_exit(sym_local)
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
