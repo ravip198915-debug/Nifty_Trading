@@ -884,87 +884,92 @@ def on_ticks(ws, ticks):
             def run_execution(sym_local):
                 global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
                 global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp, LAST_TRADE_TIME
+                global day_closed, ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN
                 with EXECUTION_LOCK:
-                    if option_ltp is None or option_ltp <= 0:
-                        trade_taken = False
+                    try:
+                        if option_ltp is None or option_ltp <= 0:
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        entry_reference_price = option_ltp
+
+                        if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
+                            print("⚠️ Slippage too high — skipping trade")
+                            send_telegram("⚠️ Slippage too high — trade skipped")
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        oid = None
+                        MAX_ENTRY_RETRY = 2
+                        for _ in range(MAX_ENTRY_RETRY):
+                            oid = place_entry_order(sym_local)
+                            if oid:
+                                break
+                            time.sleep(POLL_INTERVAL)
+                        if not oid:
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        trade["entry_order_id"] = oid
+                        fill_price, entry_status = wait_for_order_complete(oid, timeout_sec=20)
+                        if not fill_price:
+                            print(f"Entry order did not complete. Status: {entry_status}")
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        if abs(fill_price - entry_reference_price) > MAX_SLIPPAGE:
+                            print("⚠️ High slippage after fill — exiting trade")
+                            send_telegram("⚠️ High slippage exit triggered")
+                            place_live_exit(sym_local)
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        trade["prem_entry"] = fill_price
+                        sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
+                        if not sl_id or not tgt_id:
+                            print("SL/Target placement failed — exiting position immediately")
+                            place_live_exit(sym_local)
+                            day_closed = True
+                            ORDER_PLACED = False
+                            return
+
+                        trade["sl_order_id"] = sl_id
+                        trade["target_order_id"] = tgt_id
+                        trade["prem_sl"] = sl_price
+                        trade["prem_target"] = tgt_price
+                        breakout_done = True
+                        entry_price = fill_price
+                        quantity = LOT_SIZE
+                        trade_open = True
+                        LAST_TRADE_TIME = time.time()
+                        sound_entry()
+                        if not printed_entry:
+                            entry_msg = (
+                                "🚀 ENTRY TRIGGERED\n"
+                                f"Spot Entry: {round(spot_ltp or 0, 2)}\n"
+                                f"Premium Entry: {round(fill_price, 2)}\n"
+                                f"Stop Loss: {round(sl_price, 2)}\n"
+                                f"Target: {round(tgt_price, 2)}\n"
+                                f"Quantity: {LOT_SIZE}"
+                            )
+                            print(entry_msg)
+                            send_telegram(entry_msg)
+                            printed_entry = True
+                        monitor_orders(sym_local, sl_id, tgt_id)
+                    except Exception as e:
+                        print(f"run_execution error: {e}")
+                        day_closed = True
                         ORDER_PLACED = False
+                    finally:
                         ENTRY_IN_PROGRESS = False
-                        return
-
-                    entry_reference_price = option_ltp
-
-                    if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
-                        print("⚠️ Slippage too high — skipping trade")
-                        send_telegram("⚠️ Slippage too high — trade skipped")
-                        trade_taken = False
-                        ORDER_PLACED = False
-                        ENTRY_IN_PROGRESS = False
-                        return
-
-                    oid = None
-                    for _ in range(MAX_ENTRY_RETRY):
-                        oid = place_entry_order(sym_local)
-                        if oid:
-                            break
-                        time.sleep(POLL_INTERVAL)
-                    if not oid:
-                        trade_taken = False
-                        ORDER_PLACED = False
-                        ENTRY_IN_PROGRESS = False
-                        return
-
-                    trade["entry_order_id"] = oid
-                    fill_price, entry_status = wait_for_order_complete(oid, timeout_sec=20)
-                    if not fill_price:
-                        print(f"Entry order did not complete. Status: {entry_status}")
-                        trade_taken = False
-                        ORDER_PLACED = False
-                        ENTRY_IN_PROGRESS = False
-                        return
-
-                    if abs(fill_price - entry_reference_price) > MAX_SLIPPAGE:
-                        print("⚠️ High slippage after fill — exiting trade")
-                        send_telegram("⚠️ High slippage exit triggered")
-                        place_live_exit(sym_local)
-                        trade_taken = False
-                        ORDER_PLACED = False
-                        ENTRY_IN_PROGRESS = False
-                        return
-
-                    trade["prem_entry"] = fill_price
-                    sl_id, tgt_id, sl_price, tgt_price = place_sl_target(sym_local, fill_price)
-                    if not sl_id or not tgt_id:
-                        print("SL/Target placement failed — exiting position immediately")
-                        place_live_exit(sym_local)
-                        trade_taken = False
-                        ORDER_PLACED = False
-                        ENTRY_IN_PROGRESS = False
-                        return
-
-                    trade["sl_order_id"] = sl_id
-                    trade["target_order_id"] = tgt_id
-                    trade["prem_sl"] = sl_price
-                    trade["prem_target"] = tgt_price
-                    breakout_done = True
-                    entry_price = fill_price
-                    quantity = LOT_SIZE
-                    trade_open = True
-                    LAST_TRADE_TIME = time.time()
-                    ENTRY_IN_PROGRESS = False
-                    sound_entry()
-                    if not printed_entry:
-                        entry_msg = (
-                            "🚀 ENTRY TRIGGERED\n"
-                            f"Spot Entry: {round(spot_ltp or 0, 2)}\n"
-                            f"Premium Entry: {round(fill_price, 2)}\n"
-                            f"Stop Loss: {round(sl_price, 2)}\n"
-                            f"Target: {round(tgt_price, 2)}\n"
-                            f"Quantity: {LOT_SIZE}"
-                        )
-                        print(entry_msg)
-                        send_telegram(entry_msg)
-                        printed_entry = True
-                    monitor_orders(sym_local, sl_id, tgt_id)
+                        if not trade_open:
+                            ACTIVE_SYMBOL = None
+                            ACTIVE_OPTION_TOKEN = None
 
             threading.Thread(target=run_execution, args=(sym,), daemon=True).start()
 
