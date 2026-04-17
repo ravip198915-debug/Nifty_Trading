@@ -85,6 +85,8 @@ LOT_SIZE=130
 
 PREM_SL_PTS=20
 PREM_TGT_PTS=40	
+MAX_ENTRY_RETRY=2
+COOLDOWN=60
 
 LAST_ENTRY_TIME=dtime(15,15)
 FORCE_EXIT_TIME=dtime(15,20)
@@ -108,6 +110,7 @@ printed_930 = False
 printed_entry = False
 printed_exit = False
 summary_sent = False
+LAST_TRADE_TIME = None
 
 AUTO_SIGNAL="NO TRADE"
 allowed_side=None
@@ -411,6 +414,26 @@ def has_pending_order(sym):
     return False
 
 
+def has_any_pending_order():
+    try:
+        for o in fetch_orders_cached(force=True).values():
+            if o["status"] in OPEN_ORDER_STATUSES:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def has_any_open_position():
+    try:
+        for p in kite.positions()["net"]:
+            if p.get("product") == PRODUCT and abs(p.get("quantity", 0)) > 0:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def place_entry_order(sym):
     if option_ltp is None:
         return None
@@ -453,8 +476,8 @@ def wait_for_order_complete(order_id, timeout_sec=20):
 
 def place_sl_target(sym, entry_price):
     # SL-M mandatory: only trigger price, no limit SL price.
-    sl_trigger = round(entry_price - PREM_SL_PTS, 1)
-    target_price = round(entry_price + PREM_TGT_PTS, 1)
+    sl_trigger = max(0.5, round(entry_price - 20, 1))
+    target_price = round(entry_price + 40, 1)
     sl_id = None
     tgt_id = None
     try:
@@ -676,7 +699,7 @@ def on_ticks(ws, ticks):
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
-    global printed_entry, summary_sent, LAST_TICK_TIME
+    global printed_entry, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
             return
@@ -747,6 +770,9 @@ def on_ticks(ws, ticks):
 
         # ===== ENTRY =====
         if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
+            if trade_taken:
+                return
+
             if trade_taken or day_closed:
                 return
 
@@ -761,6 +787,9 @@ def on_ticks(ws, ticks):
                 return
 
             if day_pnl <= DAILY_LOSS_LIMIT:
+                return
+
+            if LAST_TRADE_TIME and (time.time() - LAST_TRADE_TIME) < COOLDOWN:
                 return
 
             #⭐ AUTO SIGNAL LOCK (ADD THIS)
@@ -807,17 +836,26 @@ def on_ticks(ws, ticks):
             else:
                 return
 
-            atm = get_atm_option(spot_ltp, side)
-            if not atm:
-                print("ATM option not found — skipping entry safely")
-                return
-            sym, tok = atm
-            ACTIVE_OPTION_TOKEN = tok
-            ACTIVE_SYMBOL = sym
+            if ACTIVE_SYMBOL is None:
+                atm = get_atm_option(spot_ltp, side)
+                if not atm:
+                    ACTIVE_OPTION_TOKEN = None
+                    ACTIVE_SYMBOL = None
+                    ORDER_PLACED = False
+                    ENTRY_IN_PROGRESS = False
+                    print("ATM option not found — skipping entry safely")
+                    return
+                ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = atm
+
+            sym = ACTIVE_SYMBOL
+            tok = ACTIVE_OPTION_TOKEN
 
             # ⭐ POSITION SAFETY (ADD THIS)
             if get_open_qty(sym) > 0:
                 print("Position already exists — skipping entry")
+                return
+            if has_any_open_position():
+                print("Another open position exists — skipping entry")
                 return
 
             if ws:
@@ -830,19 +868,25 @@ def on_ticks(ws, ticks):
             if has_pending_order(sym):
                 print("Order already pending — skipping duplicate entry")
                 return
+            if has_any_pending_order():
+                print("Pending order exists in account — skipping duplicate entry")
+                return
 
             if ENTRY_IN_PROGRESS:
                 return
 
+            # Strict pre-locking to avoid race condition / re-entry.
+            trade_taken = True
             ORDER_PLACED = True
             ENTRY_IN_PROGRESS = True
             trade.clear()
 
             def run_execution(sym_local):
                 global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS
-                global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp
+                global trade_taken, breakout_done, entry_price, quantity, printed_entry, option_ltp, LAST_TRADE_TIME
                 with EXECUTION_LOCK:
                     if option_ltp is None or option_ltp <= 0:
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -852,12 +896,19 @@ def on_ticks(ws, ticks):
                     if abs(option_ltp - entry_reference_price) > MAX_SLIPPAGE:
                         print("⚠️ Slippage too high — skipping trade")
                         send_telegram("⚠️ Slippage too high — trade skipped")
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
 
-                    oid = place_entry_order(sym_local)
+                    oid = None
+                    for _ in range(MAX_ENTRY_RETRY):
+                        oid = place_entry_order(sym_local)
+                        if oid:
+                            break
+                        time.sleep(POLL_INTERVAL)
                     if not oid:
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -866,6 +917,7 @@ def on_ticks(ws, ticks):
                     fill_price, entry_status = wait_for_order_complete(oid, timeout_sec=20)
                     if not fill_price:
                         print(f"Entry order did not complete. Status: {entry_status}")
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -874,6 +926,7 @@ def on_ticks(ws, ticks):
                         print("⚠️ High slippage after fill — exiting trade")
                         send_telegram("⚠️ High slippage exit triggered")
                         place_live_exit(sym_local)
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -883,6 +936,7 @@ def on_ticks(ws, ticks):
                     if not sl_id or not tgt_id:
                         print("SL/Target placement failed — exiting position immediately")
                         place_live_exit(sym_local)
+                        trade_taken = False
                         ORDER_PLACED = False
                         ENTRY_IN_PROGRESS = False
                         return
@@ -891,11 +945,11 @@ def on_ticks(ws, ticks):
                     trade["target_order_id"] = tgt_id
                     trade["prem_sl"] = sl_price
                     trade["prem_target"] = tgt_price
-                    trade_taken = True
                     breakout_done = True
                     entry_price = fill_price
                     quantity = LOT_SIZE
                     trade_open = True
+                    LAST_TRADE_TIME = time.time()
                     ENTRY_IN_PROGRESS = False
                     sound_entry()
                     if not printed_entry:
