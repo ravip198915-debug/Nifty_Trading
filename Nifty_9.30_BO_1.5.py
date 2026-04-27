@@ -265,19 +265,23 @@ def get_atm_option(spot,side):
     strike = int((spot + 25) // 50) * 50
     expiry = get_next_expiry()
 
-    candidates = [
+    filtered = [
         i for i in INSTRUMENTS
-        if i["name"] == "NIFTY" and i["expiry"] == expiry and i["instrument_type"] in ("CE", "PE") and i["instrument_type"] == side
+        if i["name"] == "NIFTY"
+        and i["expiry"] == expiry
+        and i["instrument_type"] == side
     ]
 
-    if not candidates:
+    if not filtered:
         return None
 
-    selected = min(candidates, key=lambda x: abs(x["strike"] - strike))
-    print(f"Selected strike: {strike}")
-    print(f"Selected symbol: {selected['tradingsymbol']}")
+    selected = min(filtered, key=lambda x: abs(x["strike"] - strike))
+    symbol = selected["tradingsymbol"]
+    print(f"Spot: {spot}")
+    print(f"Calculated ATM Strike: {strike}")
+    print(f"Selected: {symbol} | Strike: {strike}")
 
-    return selected["tradingsymbol"], selected["instrument_token"]
+    return symbol, selected["instrument_token"]
 
 # ================= FETCH =================
 def fetch_spot():
