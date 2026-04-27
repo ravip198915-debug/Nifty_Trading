@@ -425,42 +425,35 @@ def has_any_open_position():
 
 
 def place_entry_order(sym):
+    global trade
     if option_ltp is None:
         return None
-    price = round(option_ltp + get_buffer(option_ltp), 1)
-    try:
-        return kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=EXCHANGE,
-            tradingsymbol=sym,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=LOT_SIZE,
-            product=PRODUCT,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=price,
-            validity=kite.VALIDITY_DAY
-        )
-    except Exception:
-        return None
+    price = round(option_ltp, 1)
+    order_id = f"PAPER_ENTRY_{int(time.time() * 1000)}"
+    trade["paper_entry_symbol"] = sym
+    trade["paper_entry_price"] = price
+    trade["entry_order_id"] = order_id
+    msg = f"📝 PAPER ENTRY | {sym} | Qty: {LOT_SIZE} | Price: {price}"
+    print(msg)
+    send_telegram(msg)
+    return order_id
 
 
 def wait_for_order_complete(order_id, timeout_sec=20):
     """
-    Wait for order completion without any modify/retry loops.
+    Wait for paper order completion.
     Returns (fill_price, status) where fill_price is None on failure.
     """
+    if not order_id:
+        return None, "INVALID"
+
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
+        if option_ltp is not None:
+            fill_price = round(option_ltp, 1)
+            return fill_price, "COMPLETE"
         time.sleep(POLL_INTERVAL)
-        od = get_order_by_id(order_id, force=True)
-        if not od:
-            continue
-        status = od.get("status")
-        if status == "COMPLETE":
-            avg_price = float(od.get("average_price") or 0)
-            return (avg_price if avg_price > 0 else None), status
-        if status in {"CANCELLED", "REJECTED"}:
-            return None, status
+
     return None, "TIMEOUT"
 
 
@@ -469,46 +462,20 @@ def place_sl_target(sym, entry_price):
     sl_trigger = max(0.5, round(entry_price - PREM_SL_PTS, 1))
     target_price = round(entry_price + PREM_TGT_PTS, 1)
 
-    sl_id = None
-    tgt_id = None
+    sl_id = f"PAPER_SL_{int(time.time() * 1000)}"
+    tgt_id = f"PAPER_TGT_{int(time.time() * 1000)}"
 
-    try:
-        sl_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=EXCHANGE,
-            tradingsymbol=sym,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=LOT_SIZE,
-            product=PRODUCT,
-            order_type=kite.ORDER_TYPE_SLM,
-            trigger_price=sl_trigger,
-            validity=kite.VALIDITY_DAY
-        )
-    except Exception as e:
-        print(f"SL-M placement failed: {e}")
-        return None, None, sl_trigger, target_price
+    trade["prem_sl"] = sl_trigger
+    trade["prem_target"] = target_price
+    trade["sl_order_id"] = sl_id
+    trade["target_order_id"] = tgt_id
 
-    try:
-        tgt_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=EXCHANGE,
-            tradingsymbol=sym,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=LOT_SIZE,
-            product=PRODUCT,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=target_price,
-            validity=kite.VALIDITY_DAY
-        )
-    except Exception as e:
-        print(f"Target placement failed: {e}")
-
-        try:
-            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=sl_id)
-        except Exception:
-            pass
-
-        return None, None, sl_trigger, target_price
+    msg = (
+        f"📝 PAPER SL/TARGET | {sym} | Entry: {round(entry_price, 2)} | "
+        f"SL: {sl_trigger} | Target: {target_price}"
+    )
+    print(msg)
+    send_telegram(msg)
 
     return sl_id, tgt_id, sl_trigger, target_price
 
@@ -518,20 +485,20 @@ def monitor_orders(sym, sl_order_id, target_order_id):
     global summary_sent, trade_taken
     while trade_open and (sl_order_id or target_order_id):
         time.sleep(POLL_INTERVAL)
-        sl_od = get_order_by_id(sl_order_id, force=True) if sl_order_id else None
-        tg_od = get_order_by_id(target_order_id, force=False) if target_order_id else None
 
-        sl_done = sl_od and sl_od.get("status") == "COMPLETE"
-        tg_done = tg_od and tg_od.get("status") == "COMPLETE"
+        if option_ltp is None:
+            continue
+
+        ltp_now = float(option_ltp)
+        sl_price = float(trade.get("prem_sl") or 0)
+        tgt_price = float(trade.get("prem_target") or 0)
+
+        sl_done = sl_price > 0 and ltp_now <= sl_price
+        tg_done = tgt_price > 0 and ltp_now >= tgt_price
 
         if sl_done:
-            if target_order_id:
-                try:
-                    kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=target_order_id)
-                except Exception:
-                    pass
             trade["exit_reason"] = "SL"
-            exit_price = float(sl_od.get("average_price") or sl_od.get("price") or trade.get("prem_sl") or 0)
+            exit_price = ltp_now
             pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
             day_pnl += pnl
             if day_pnl <= DAILY_LOSS_LIMIT:
@@ -548,13 +515,8 @@ def monitor_orders(sym, sl_order_id, target_order_id):
             break
 
         if tg_done:
-            if sl_order_id:
-                try:
-                    kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=sl_order_id)
-                except Exception:
-                    pass
             trade["exit_reason"] = "TARGET"
-            exit_price = float(tg_od.get("average_price") or tg_od.get("price") or trade.get("prem_target") or 0)
+            exit_price = ltp_now
             pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
             day_pnl += pnl
             if day_pnl <= DAILY_LOSS_LIMIT:
@@ -644,28 +606,30 @@ def recover_position():
 
 # ================= SAFE EXIT ORDER =================
 def place_live_exit(sym):
+    global trade_open, ORDER_PLACED, ENTRY_IN_PROGRESS, exit_price, pnl, day_pnl
     try:
-        qty = get_open_qty(sym)
-
-        if not qty:
+        if not trade_open:
             return
 
         if option_ltp is None:
             return
 
-        price = round(max(0.1, option_ltp - 1), 1)
+        exit_price = round(float(option_ltp), 1)
+        pnl = (exit_price - entry_price) * quantity if entry_price is not None else 0
+        day_pnl += pnl
 
-        kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=EXCHANGE,
-            tradingsymbol=sym,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=qty,
-            product=PRODUCT,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=price,   # ✅ IMPORTANT
-            validity=kite.VALIDITY_DAY
+        trade["exit_reason"] = trade.get("exit_reason") or "LIVE_EXIT"
+
+        msg = (
+            f"📝 PAPER LIVE EXIT | {sym} | Exit: {exit_price} | "
+            f"Qty: {quantity} | P&L: {round(pnl, 2)}"
         )
+        print(msg)
+        send_telegram(msg)
+
+        trade_open = False
+        ORDER_PLACED = False
+        ENTRY_IN_PROGRESS = False
 
     except Exception:
         pass
