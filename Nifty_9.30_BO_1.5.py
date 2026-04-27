@@ -262,7 +262,6 @@ def get_atm_option(spot,side):
     if spot is None:
         return None
 
-    strike = int((spot + 25) // 50) * 50
     expiry = get_next_expiry()
 
     filtered = [
@@ -275,11 +274,11 @@ def get_atm_option(spot,side):
     if not filtered:
         return None
 
-    selected = min(filtered, key=lambda x: abs(x["strike"] - strike))
+    selected = min(filtered, key=lambda x: abs(x["strike"] - spot))
     symbol = selected["tradingsymbol"]
     print(f"Spot: {spot}")
-    print(f"Calculated ATM Strike: {strike}")
-    print(f"Selected: {symbol} | Strike: {strike}")
+    print(f"Selected Strike: {selected['strike']}")
+    print(f"Selected Symbol: {symbol}")
 
     return symbol, selected["instrument_token"]
 
