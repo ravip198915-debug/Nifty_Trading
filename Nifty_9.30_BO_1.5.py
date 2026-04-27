@@ -259,40 +259,25 @@ def get_next_expiry():
 
 
 def get_atm_option(spot,side):
-    """
-    Return ATM option for next weekly expiry.
-    Fixes:
-    1) Never crash callers due to None unpacking.
-    2) If exact strike is missing, choose nearest available strike.
-    3) Return None only when no instruments exist for requested side/expiry.
-    """
     if spot is None:
-        print("ATM lookup skipped: spot is None")
         return None
 
-    strike = round(spot / 50) * 50
+    strike = int((spot + 25) // 50) * 50
     expiry = get_next_expiry()
-    print(f"{YELLOW}Using NEXT WEEK Expiry: {expiry}{RESET}")
 
     candidates = [
         i for i in INSTRUMENTS
-        if i["name"] == "NIFTY" and i["expiry"] == expiry and i["instrument_type"] == side
+        if i["name"] == "NIFTY" and i["expiry"] == expiry and i["instrument_type"] in ("CE", "PE") and i["instrument_type"] == side
     ]
 
     if not candidates:
-        print(f"ATM lookup failed: no {side} instruments for expiry {expiry}")
         return None
 
-    exact = next((i for i in candidates if i["strike"] == strike), None)
-    if exact:
-        return exact["tradingsymbol"], exact["instrument_token"]
+    selected = min(candidates, key=lambda x: abs(x["strike"] - strike))
+    print(f"Selected strike: {strike}")
+    print(f"Selected symbol: {selected['tradingsymbol']}")
 
-    nearest = min(candidates, key=lambda x: abs(x["strike"] - strike))
-    print(
-        f"{YELLOW}Exact strike {strike} not found. "
-        f"Using nearest strike {nearest['strike']} ({nearest['tradingsymbol']}){RESET}"
-    )
-    return nearest["tradingsymbol"], nearest["instrument_token"]
+    return selected["tradingsymbol"], selected["instrument_token"]
 
 # ================= FETCH =================
 def fetch_spot():
