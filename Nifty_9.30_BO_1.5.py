@@ -260,7 +260,6 @@ def get_next_expiry():
 
 
 def get_atm_option(spot,side):
-    global PRINTED_ONCE
     if spot is None:
         return None
 
@@ -278,12 +277,6 @@ def get_atm_option(spot,side):
 
     selected = min(filtered, key=lambda x: abs(x["strike"] - spot))
     symbol = selected["tradingsymbol"]
-    if not PRINTED_ONCE:
-        print(f"Spot: {spot}")
-        print(f"Selected Strike: {selected['strike']}")
-        print(f"Selected Symbol: {symbol}")
-        PRINTED_ONCE = True
-
     return symbol, selected["instrument_token"]
 
 # ================= FETCH =================
@@ -301,7 +294,7 @@ def fetch_spot():
 
 # ================= 9:30 CANDLE =================
 def fetch_930_candle():
-    global candle_done, printed_930
+    global candle_done, printed_930, PRINTED_ONCE
 
     if candle_done:
         return
@@ -352,6 +345,17 @@ def fetch_930_candle():
         printed_930 = True
 
     calculate_auto_signal()
+
+    if not PRINTED_ONCE:
+        atm_option = get_atm_option(spot_ltp, allowed_side)
+        if atm_option:
+            symbol, _ = atm_option
+            selected = next((i for i in INSTRUMENTS if i["tradingsymbol"] == symbol), None)
+            if selected:
+                print(f"Spot: {spot_ltp}")
+                print(f"Selected Strike: {selected['strike']}")
+                print(f"Selected Symbol: {symbol}")
+                PRINTED_ONCE = True
     
 
 # ================= EXECUTION ENGINE =================
