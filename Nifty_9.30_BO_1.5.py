@@ -111,6 +111,7 @@ printed_entry = False
 printed_exit = False
 summary_sent = False
 LAST_TRADE_TIME = None
+PRINTED_ONCE = False
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -259,6 +260,7 @@ def get_next_expiry():
 
 
 def get_atm_option(spot,side):
+    global PRINTED_ONCE
     if spot is None:
         return None
 
@@ -276,9 +278,11 @@ def get_atm_option(spot,side):
 
     selected = min(filtered, key=lambda x: abs(x["strike"] - spot))
     symbol = selected["tradingsymbol"]
-    print(f"Spot: {spot}")
-    print(f"Selected Strike: {selected['strike']}")
-    print(f"Selected Symbol: {symbol}")
+    if not PRINTED_ONCE:
+        print(f"Spot: {spot}")
+        print(f"Selected Strike: {selected['strike']}")
+        print(f"Selected Symbol: {symbol}")
+        PRINTED_ONCE = True
 
     return symbol, selected["instrument_token"]
 
