@@ -112,6 +112,7 @@ printed_exit = False
 summary_sent = False
 LAST_TRADE_TIME = None
 PRINTED_ONCE = False
+API_FAILURE_COUNT = 0
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -139,6 +140,35 @@ candle_done=False
 # ================= KITE =================
 kite=KiteConnect(api_key=API_KEY)
 kite.set_access_token(ACCESS_TOKEN)
+
+def safe_kite_call(api_callable, *args, **kwargs):
+    global API_FAILURE_COUNT
+    for attempt in range(1, 4):
+        try:
+            result = api_callable(*args, **kwargs)
+            result_text = str(result).lower() if isinstance(result, str) else ""
+            if (
+                "502" in result_text
+                or "bad gateway" in result_text
+                or "<html" in result_text
+            ):
+                raise Exception(f"Gateway/HTML response detected: {result_text[:100]}")
+            API_FAILURE_COUNT = 0
+            return result
+        except Exception as e:
+            err_text = str(e).lower()
+            if "502" in err_text or "bad gateway" in err_text or "<html" in err_text:
+                print(f"API retry {attempt}/3 due to gateway failure: {e}")
+            else:
+                print(f"API retry {attempt}/3 due to API error: {e}")
+            if attempt < 3:
+                time.sleep(1 + (attempt % 2))
+
+    API_FAILURE_COUNT += 1
+    if API_FAILURE_COUNT >= 5:
+        print("API UNSTABLE — PAUSING")
+        time.sleep(30)
+    return None
 
 print("Token test:",kite.profile()["user_name"])
 print("Downloading instruments...")
@@ -173,12 +203,16 @@ def calculate_auto_signal():
     today = date.today()
 
     # ⭐ SINGLE DAILY DATA FETCH (used for CPR + MA20)
-    hist = kite.historical_data(
+    hist = safe_kite_call(
+        kite.historical_data,
         SPOT_TOKEN,
         today - timedelta(days=50),   # buffer for holidays
         today,
         "day"
     )
+    if hist is None:
+        print("AUTO SIGNAL skipped: historical_data unavailable")
+        return
 
     if not hist or len(hist) < 22:
         print("Not enough daily candles — skipping AUTO SIGNAL")
@@ -283,7 +317,9 @@ def get_atm_option(spot,side):
 def fetch_spot():
     global spot_ltp
     try:
-        data = kite.ltp(["NSE:NIFTY 50"])
+        data = safe_kite_call(kite.ltp, ["NSE:NIFTY 50"])
+        if data is None:
+            return
         if "NSE:NIFTY 50" in data:
             spot_ltp = data["NSE:NIFTY 50"]["last_price"]
         else:
@@ -306,12 +342,16 @@ def fetch_930_candle():
     if now < dtime(9,35):
         return
 
-    data = kite.historical_data(
+    data = safe_kite_call(
+        kite.historical_data,
         SPOT_TOKEN,
         datetime.combine(today, dtime(9,30)),
         datetime.combine(today, dtime(9,35)),
         "5minute"
     )
+    if data is None:
+        print("9:30 candle fetch unavailable — skipping this cycle")
+        return
 
     # ⭐ AFTER 9:35 — if still no data → holiday
     if not data:
@@ -387,7 +427,9 @@ def fetch_orders_cached(force=False):
     if not force and (now - ORDER_CACHE_AT) < POLL_INTERVAL and ORDER_BOOK_CACHE:
         return ORDER_BOOK_CACHE
     try:
-        orders = kite.orders()
+        orders = safe_kite_call(kite.orders)
+        if orders is None:
+            return ORDER_BOOK_CACHE
         ORDER_BOOK_CACHE = {o["order_id"]: o for o in orders}
         ORDER_CACHE_AT = now
         return ORDER_BOOK_CACHE
@@ -424,7 +466,10 @@ def has_any_pending_order():
 
 def has_any_open_position():
     try:
-        for p in kite.positions()["net"]:
+        pos_data = safe_kite_call(kite.positions)
+        if pos_data is None:
+            return False
+        for p in pos_data.get("net", []):
             if p.get("product") == PRODUCT and abs(p.get("quantity", 0)) > 0:
                 return True
     except Exception:
@@ -577,7 +622,10 @@ def monitor_orders(sym, sl_order_id, target_order_id):
 def get_open_qty(sym):
 
     try:
-        pos = kite.positions()["net"]
+        pos_data = safe_kite_call(kite.positions)
+        if pos_data is None:
+            return None
+        pos = pos_data.get("net", [])
 
         for p in pos:
             if p["tradingsymbol"] == sym and abs(p["quantity"]) > 0:
@@ -596,7 +644,10 @@ def recover_position():
     global trade_open, ACTIVE_SYMBOL
 
     try:
-        pos = kite.positions()["net"]
+        pos_data = safe_kite_call(kite.positions)
+        if pos_data is None:
+            return
+        pos = pos_data.get("net", [])
 
         for p in pos:
             if abs(p["quantity"]) > 0 and p["product"] == PRODUCT:
@@ -688,7 +739,10 @@ def on_ticks(ws, ticks):
         # ================= MANUAL ENTRY DETECTION =================
         if not trade_open and not MANUAL_HANDLED:
             try:
-                pos = kite.positions()["net"]
+                pos_data = safe_kite_call(kite.positions)
+                if pos_data is None:
+                    return
+                pos = pos_data.get("net", [])
 
                 for p in pos:
                     if p.get("product") == PRODUCT and abs(p.get("quantity", 0)) > 0:
@@ -924,7 +978,7 @@ def heartbeat():
             fetch_930_candle()
 
         # Heartbeat delay
-        time.sleep(1)
+        time.sleep(2)
 
 
 # Start background heartbeat
