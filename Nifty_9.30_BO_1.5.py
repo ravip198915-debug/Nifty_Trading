@@ -115,6 +115,7 @@ summary_sent = False
 LAST_TRADE_TIME = None
 PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
+LAST_VALID_SPOT = None
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -720,7 +721,7 @@ def on_ticks(ws, ticks):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global FIXED_SYMBOL, FIXED_TOKEN
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
-    global spot_ltp, option_ltp, day_closed
+    global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
@@ -739,7 +740,23 @@ def on_ticks(ws, ticks):
         # ===== UPDATE LTP =====
         for t in ticks:
             if "last_price" in t:
-                spot_ltp = t["last_price"]
+                new_price = t["last_price"]
+
+                # Reject invalid values
+                if new_price <= 0:
+                    return
+
+                # Reject sudden spike (>2% move in one tick)
+                if LAST_VALID_SPOT is not None:
+                    change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
+                    if change_pct > 2:
+                        print(f"⚠️ Bad tick ignored: {new_price}")
+                        return
+
+                spot_ltp = new_price
+                LAST_VALID_SPOT = new_price
+                print(f"Spot LTP (validated): {spot_ltp}")
+
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
 
