@@ -99,6 +99,8 @@ option_ltp=None
 trade_open=False
 ACTIVE_OPTION_TOKEN=None
 ACTIVE_SYMBOL=None
+FIXED_SYMBOL=None
+FIXED_TOKEN=None
 ORDER_PLACED=False
 BLOCK_MSG_SHOWN=False
 LAST_BLOCK_REASON=None
@@ -330,7 +332,7 @@ def fetch_spot():
 
 # ================= 9:30 CANDLE =================
 def fetch_930_candle():
-    global candle_done, printed_930, PRINTED_ONCE
+    global candle_done, printed_930, PRINTED_ONCE, FIXED_SYMBOL, FIXED_TOKEN
 
     if candle_done:
         return
@@ -389,9 +391,11 @@ def fetch_930_candle():
     if not PRINTED_ONCE:
         atm_option = get_atm_option(spot_ltp, allowed_side)
         if atm_option:
-            symbol, _ = atm_option
+            symbol, token = atm_option
             selected = next((i for i in INSTRUMENTS if i["tradingsymbol"] == symbol), None)
             if selected:
+                FIXED_SYMBOL = symbol
+                FIXED_TOKEN = token
                 print(f"Spot: {spot_ltp}")
                 print(f"Selected Strike: {selected['strike']}")
                 print(f"Selected Symbol: {symbol}")
@@ -712,6 +716,7 @@ def on_close(ws, c, r):
 def on_ticks(ws, ticks):
 
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
+    global FIXED_SYMBOL, FIXED_TOKEN
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
@@ -855,11 +860,14 @@ def on_ticks(ws, ticks):
 
             else:
                 return
-            atm = get_atm_option(spot_ltp, side)
-            if not atm:
+            if FIXED_SYMBOL is None or FIXED_TOKEN is None:
                 return
 
-            ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = atm
+            if side != allowed_side:
+                return
+
+            print(f"ENTRY USING: {FIXED_SYMBOL}")
+            ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
             if ws:
                 ws.subscribe([ACTIVE_OPTION_TOKEN])
