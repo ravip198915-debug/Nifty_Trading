@@ -362,6 +362,7 @@ def fetch_930_candle():
 
     candle["high"] = data[0]["high"]
     candle["low"] = data[0]["low"]
+    candle_close = data[0]["close"]
 
     if candle["high"] is None or candle["low"] is None:
         return
@@ -389,7 +390,7 @@ def fetch_930_candle():
     calculate_auto_signal()
 
     if not PRINTED_ONCE:
-        reference_price = (candle["high"] + candle["low"]) / 2
+        reference_price = candle_close
         atm_option = get_atm_option(reference_price, allowed_side)
         if atm_option:
             symbol, token = atm_option
@@ -397,7 +398,7 @@ def fetch_930_candle():
             if selected:
                 FIXED_SYMBOL = symbol
                 FIXED_TOKEN = token
-                print(f"Reference Price (9:30 midpoint): {reference_price}")
+                print(f"Reference Price (9:30 close): {reference_price}")
                 print(f"Selected Strike: {selected['strike']}")
                 print(f"Selected Symbol: {symbol}")
                 PRINTED_ONCE = True
