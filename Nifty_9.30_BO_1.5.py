@@ -864,9 +864,6 @@ def on_ticks(ws, ticks):
             if FIXED_SYMBOL is None or FIXED_TOKEN is None:
                 return
 
-            if side != allowed_side:
-                return
-
             print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
             ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
