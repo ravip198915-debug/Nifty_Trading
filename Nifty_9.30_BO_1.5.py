@@ -116,6 +116,7 @@ LAST_TRADE_TIME = None
 PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
 LAST_VALID_SPOT = None
+LAST_PNL_PRINT_TIME = None
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -724,7 +725,7 @@ def on_ticks(ws, ticks):
     global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
-    global MANUAL_HANDLED
+    global MANUAL_HANDLED, LAST_PNL_PRINT_TIME
 
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
@@ -755,7 +756,6 @@ def on_ticks(ws, ticks):
 
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
-                print(f"Spot LTP (validated): {spot_ltp}")
 
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
@@ -932,6 +932,7 @@ def on_ticks(ws, ticks):
                     entry_price = fill_price
                     quantity = LOT_SIZE
                     trade_open = True
+                    LAST_PNL_PRINT_TIME = None
 
                     threading.Thread(
                         target=monitor_orders,
@@ -950,6 +951,30 @@ def on_ticks(ws, ticks):
             if qty == 0:
                 trade_open = False
                 ORDER_PLACED = False
+
+        # ===== P&L PRINT EVERY 10 MIN =====
+        if trade_open and entry_price is not None and quantity > 0:
+
+            now_ts = time.time()
+
+            if LAST_PNL_PRINT_TIME is None or (now_ts - LAST_PNL_PRINT_TIME) >= 600:
+
+                if option_ltp is not None:
+                    current_pnl = (option_ltp - entry_price) * quantity
+
+                    msg = (
+                        f"📊 LIVE P&L UPDATE\n"
+                        f"Symbol: {ACTIVE_SYMBOL}\n"
+                        f"Entry: {round(entry_price,2)}\n"
+                        f"LTP: {round(option_ltp,2)}\n"
+                        f"Qty: {quantity}\n"
+                        f"P&L: {round(current_pnl,2)}"
+                    )
+
+                    print(msg)
+                    send_telegram(msg)
+
+                    LAST_PNL_PRINT_TIME = now_ts
 
     except Exception as e:
         print("on_ticks error:", e)
