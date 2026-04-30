@@ -116,7 +116,6 @@ LAST_TRADE_TIME = None
 PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
 LAST_VALID_SPOT = None
-LAST_PNL_PRINT_TIME = None
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -725,7 +724,7 @@ def on_ticks(ws, ticks):
     global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
-    global MANUAL_HANDLED, LAST_PNL_PRINT_TIME
+    global MANUAL_HANDLED
 
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
@@ -910,7 +909,7 @@ def on_ticks(ws, ticks):
             trade.clear()
 
             def run_execution(sym_local):
-                global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, LAST_PNL_PRINT_TIME
+                global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED
 
                 try:
                     oid = place_entry_order(sym_local)
@@ -932,7 +931,6 @@ def on_ticks(ws, ticks):
                     entry_price = fill_price
                     quantity = LOT_SIZE
                     trade_open = True
-                    LAST_PNL_PRINT_TIME = None
 
                     threading.Thread(
                         target=monitor_orders,
@@ -1006,35 +1004,33 @@ def heartbeat():
         time.sleep(2)
 
 def pnl_tracker():
-    global LAST_PNL_PRINT_TIME
 
     while SCRIPT_RUNNING:
 
         if trade_open and entry_price is not None and quantity > 0:
 
-            now_ts = time.time()
+            if option_ltp is not None:
 
-            if LAST_PNL_PRINT_TIME is None or (now_ts - LAST_PNL_PRINT_TIME) >= 600:
+                current_pnl = (option_ltp - entry_price) * quantity
 
-                if option_ltp is not None:
+                msg = (
+                    f"📊 LIVE P&L UPDATE\n"
+                    f"Symbol: {ACTIVE_SYMBOL}\n"
+                    f"Entry: {round(entry_price,2)}\n"
+                    f"LTP: {round(option_ltp,2)}\n"
+                    f"Qty: {quantity}\n"
+                    f"P&L: {round(current_pnl,2)}"
+                )
 
-                    current_pnl = (option_ltp - entry_price) * quantity
+                print(msg)
+                send_telegram(msg)
 
-                    msg = (
-                        f"📊 LIVE P&L UPDATE\n"
-                        f"Symbol: {ACTIVE_SYMBOL}\n"
-                        f"Entry: {round(entry_price,2)}\n"
-                        f"LTP: {round(option_ltp,2)}\n"
-                        f"Qty: {quantity}\n"
-                        f"P&L: {round(current_pnl,2)}"
-                    )
+            # ⏱ wait exactly 10 minutes
+            time.sleep(600)
 
-                    print(msg)
-                    send_telegram(msg)
-
-                    LAST_PNL_PRINT_TIME = now_ts
-
-        time.sleep(5)
+        else:
+            # ⏳ wait before checking again
+            time.sleep(10)
 
 
 # Start background heartbeat
