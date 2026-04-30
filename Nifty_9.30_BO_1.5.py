@@ -744,14 +744,14 @@ def on_ticks(ws, ticks):
 
                 # Reject invalid values
                 if new_price <= 0:
-                    return
+                    continue
 
                 # Reject sudden spike (>2% move in one tick)
                 if LAST_VALID_SPOT is not None:
                     change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
                     if change_pct > 2:
                         print(f"⚠️ Bad tick ignored: {new_price}")
-                        return
+                        continue
 
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
