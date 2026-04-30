@@ -389,14 +389,15 @@ def fetch_930_candle():
     calculate_auto_signal()
 
     if not PRINTED_ONCE:
-        atm_option = get_atm_option(spot_ltp, allowed_side)
+        reference_price = (candle["high"] + candle["low"]) / 2
+        atm_option = get_atm_option(reference_price, allowed_side)
         if atm_option:
             symbol, token = atm_option
             selected = next((i for i in INSTRUMENTS if i["tradingsymbol"] == symbol), None)
             if selected:
                 FIXED_SYMBOL = symbol
                 FIXED_TOKEN = token
-                print(f"Spot: {spot_ltp}")
+                print(f"Reference Price (9:30 midpoint): {reference_price}")
                 print(f"Selected Strike: {selected['strike']}")
                 print(f"Selected Symbol: {symbol}")
                 PRINTED_ONCE = True
@@ -866,7 +867,7 @@ def on_ticks(ws, ticks):
             if side != allowed_side:
                 return
 
-            print(f"ENTRY USING: {FIXED_SYMBOL}")
+            print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
             ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
             if ws:
