@@ -110,6 +110,7 @@ WS_STOPPED = False
 LAST_TICK_TIME = time.time()
 printed_930 = False
 printed_entry = False
+printed_bad_tick = False
 printed_exit = False
 summary_sent = False
 LAST_TRADE_TIME = None
@@ -723,7 +724,7 @@ def on_ticks(ws, ticks):
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
-    global printed_entry, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
+    global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
 
     try:
@@ -750,7 +751,9 @@ def on_ticks(ws, ticks):
                 if LAST_VALID_SPOT is not None:
                     change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
                     if change_pct > 2:
-                        print(f"⚠️ Bad tick ignored: {new_price}")
+                        if not printed_bad_tick:
+                            print(f"⚠️ Bad tick ignored: {new_price}")
+                            printed_bad_tick = True
                         continue
 
                 spot_ltp = new_price
@@ -881,7 +884,9 @@ def on_ticks(ws, ticks):
             if FIXED_SYMBOL is None or FIXED_TOKEN is None:
                 return
 
-            print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
+            if not printed_entry:
+                print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
+                printed_entry = True
             ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
             if ws:
