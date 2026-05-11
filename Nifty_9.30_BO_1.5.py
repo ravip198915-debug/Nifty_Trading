@@ -117,6 +117,7 @@ LAST_TRADE_TIME = None
 PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
 LAST_VALID_SPOT = None
+LAST_SPOT = None
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -153,15 +154,23 @@ def safe_kite_call(api_callable, *args, **kwargs):
             result_text = str(result).lower() if isinstance(result, str) else ""
             if (
                 "502" in result_text
+                or "503" in result_text
                 or "bad gateway" in result_text
                 or "<html" in result_text
+                or "gateway timeout" in result_text
             ):
                 raise Exception(f"Gateway/HTML response detected: {result_text[:100]}")
             API_FAILURE_COUNT = 0
             return result
         except Exception as e:
             err_text = str(e).lower()
-            if "502" in err_text or "bad gateway" in err_text or "<html" in err_text:
+            if (
+                "502" in err_text
+                or "503" in err_text
+                or "bad gateway" in err_text
+                or "<html" in err_text
+                or "gateway timeout" in err_text
+            ):
                 print(f"API retry {attempt}/3 due to gateway failure: {e}")
             else:
                 print(f"API retry {attempt}/3 due to API error: {e}")
@@ -485,6 +494,25 @@ def has_any_open_position():
     return False
 
 
+# ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
+def log_skip(reason):
+    global LAST_BLOCK_REASON
+    if LAST_BLOCK_REASON != reason:
+        print(f"🚫 TRADE BLOCKED: {reason}")
+        send_telegram(f"🚫 TRADE BLOCKED: {reason}")
+        LAST_BLOCK_REASON = reason
+
+
+# ================= OPTION LTP RECOVERY (NEW FIX) =================
+def wait_for_valid_option_ltp(timeout=5):
+    start = time.time()
+    while time.time() - start < timeout:
+        if option_ltp is not None and option_ltp > 0:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def place_entry_order(sym):
     global trade
     if option_ltp is None:
@@ -556,6 +584,22 @@ def monitor_orders(sym, sl_order_id, target_order_id):
 
         sl_done = sl_price > 0 and ltp_now <= sl_price
         tg_done = tgt_price > 0 and ltp_now >= tgt_price
+
+        # ================= SL-M FAIL SAFE ENGINE (NEW FIX) =================
+        if sl_price > 0 and ltp_now < (sl_price - 5):
+            send_telegram("⚠️ GAP EXIT — OPTION LTP BELOW SL-5, FORCING EXIT")
+            trade["exit_reason"] = "SL_FAILSAFE"
+            place_live_exit(sym)
+            send_telegram("✅ FAILSAFE EXIT EXECUTED")
+            break
+
+        # ================= SL-M FAIL SAFE ENGINE (NEW FIX) =================
+        if sl_price > 0 and ltp_now <= sl_price:
+            send_telegram("🛑 HARD SL TRIGGERED — FORCING IMMEDIATE EXIT")
+            trade["exit_reason"] = "SL_FAILSAFE"
+            place_live_exit(sym)
+            send_telegram("✅ FAILSAFE EXIT EXECUTED")
+            break
 
         if sl_done:
             trade["exit_reason"] = "SL"
@@ -722,7 +766,7 @@ def on_ticks(ws, ticks):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global FIXED_SYMBOL, FIXED_TOKEN
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
-    global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT
+    global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT, LAST_SPOT
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
@@ -820,6 +864,8 @@ def on_ticks(ws, ticks):
 
         # ===== WAIT CONDITIONS =====
         if not candle_done or day_closed:
+            if day_closed:
+                log_skip("Day closed")
             return
 
         # ===== DAY CLOSE =====
@@ -843,26 +889,54 @@ def on_ticks(ws, ticks):
         if not trade_open and not ORDER_PLACED and spot_ltp and now < LAST_ENTRY_TIME:
 
             if trade_taken or day_closed:
+                if trade_taken:
+                    log_skip("Trade already taken")
+                else:
+                    log_skip("Day closed")
                 return
 
-            if not AUTO_READY or breakout_done or CPR_TYPE == "WIDE":
+            if not AUTO_READY:
+                log_skip("Auto signal not ready")
+                return
+            if CPR_TYPE == "WIDE":
+                log_skip("CPR is WIDE")
+                return
+            if breakout_done:
+                log_skip("Breakout already used")
                 return
 
             if allowed_side is None:
+                log_skip("Allowed side not set")
                 return
 
             side = None
+            crossed_high = (
+                LAST_SPOT is not None and
+                LAST_SPOT < candle["high"] + 3 and
+                spot_ltp >= candle["high"] + 3
+            )
+            crossed_low = (
+                LAST_SPOT is not None and
+                LAST_SPOT > candle["low"] - 3 and
+                spot_ltp <= candle["low"] - 3
+            )
 
             # ===== CE / PE BUY DAY =====
             if AUTO_SIGNAL in ["CE BUY DAY", "PE BUY DAY"]:
 
-                if spot_ltp >= candle["high"] + 3 and allowed_side == "CE":
+                if crossed_high and allowed_side == "CE":
                     side = "CE"
 
-                elif spot_ltp <= candle["low"] - 3 and allowed_side == "PE":
+                elif crossed_low and allowed_side == "PE":
                     side = "PE"
 
                 else:
+                    if crossed_high and allowed_side != "CE":
+                        log_skip("CE breakout but CE not allowed")
+                    elif crossed_low and allowed_side != "PE":
+                        log_skip("PE breakout but PE not allowed")
+                    else:
+                        log_skip("Breakout not reached")
                     return
 
 
@@ -870,18 +944,26 @@ def on_ticks(ws, ticks):
             elif AUTO_SIGNAL == "NO TRADE":
 
             # 🔥 IMPORTANT: Follow MA direction, not breakout direction
-                if allowed_side == "CE" and spot_ltp >= candle["high"] + 3:
+                if allowed_side == "CE" and crossed_high:
                     side = "CE"
 
-                elif allowed_side == "PE" and spot_ltp <= candle["low"] - 3:
+                elif allowed_side == "PE" and crossed_low:
                     side = "PE"
 
                 else:
+                    if crossed_high and allowed_side != "CE":
+                        log_skip("CE breakout but CE not allowed")
+                    elif crossed_low and allowed_side != "PE":
+                        log_skip("PE breakout but PE not allowed")
+                    else:
+                        log_skip("Breakout not reached")
                     return
 
             else:
+                log_skip("Auto signal not ready")
                 return
             if FIXED_SYMBOL is None or FIXED_TOKEN is None:
+                log_skip("FIXED_SYMBOL unavailable")
                 return
 
             if not printed_entry:
@@ -894,22 +976,39 @@ def on_ticks(ws, ticks):
                 ws.set_mode(ws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
 
             if get_open_qty(ACTIVE_SYMBOL) > 0:
+                log_skip("Existing open position")
                 return
 
             if has_any_open_position():
+                log_skip("Existing open position")
                 return
 
             if has_pending_order(ACTIVE_SYMBOL):
+                log_skip("Existing pending order")
                 return
 
             if has_any_pending_order():
+                log_skip("Existing pending order")
                 return
 
             if ENTRY_IN_PROGRESS:
+                log_skip("Entry already in progress")
                 return
 
-            
+            if time.time() - LAST_TICK_TIME > 5:
+                log_skip("WebSocket stalled")
+                return
 
+            if API_FAILURE_COUNT >= 5:
+                log_skip("API unavailable")
+                return
+
+            if not wait_for_valid_option_ltp(timeout=5):
+                log_skip("Option LTP not recovered")
+                return
+            LAST_BLOCK_REASON = None
+
+            
             ENTRY_IN_PROGRESS = True
             trade.clear()
 
@@ -926,6 +1025,7 @@ def on_ticks(ws, ticks):
                         return
 
                     trade_taken = True
+                    breakout_done = True
                     ORDER_PLACED = True
 
                     sl_id, tgt_id, _, _ = place_sl_target(sym_local, fill_price)
@@ -954,6 +1054,10 @@ def on_ticks(ws, ticks):
             if qty == 0:
                 trade_open = False
                 ORDER_PLACED = False
+
+        # ================= GUARANTEED BREAKOUT CAPTURE (NEW FIX) =================
+        if spot_ltp is not None:
+            LAST_SPOT = spot_ltp
 
     except Exception as e:
         print("on_ticks error:", e)
@@ -988,18 +1092,27 @@ kws.connect(threaded=True)
 
 
 def heartbeat():
-
+    global kws, WS_STOPPED, LAST_TICK_TIME
     while SCRIPT_RUNNING:
-        if WS_STOPPED:
-            break
-
         # Fetch spot price
         fetch_spot()
 
-        if time.time() - LAST_TICK_TIME > 10:
-            print("⚠️ WebSocket stalled — restarting safely")
-            safe_kws_stop()
-            break
+        # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
+        if time.time() - LAST_TICK_TIME > 5 and not day_closed:
+            print("⚠️ WebSocket stalled — reconnecting safely")
+            send_telegram("⚠️ WebSocket stalled — reconnecting safely")
+            try:
+                kws.close()
+            except Exception:
+                pass
+            time.sleep(1)
+            kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+            kws.on_ticks = on_ticks
+            kws.on_connect = on_connect
+            kws.on_close = on_close
+            WS_STOPPED = False
+            kws.connect(threaded=True)
+            LAST_TICK_TIME = time.time()
 
         # Fetch 9:30 candle once
         if not candle_done and datetime.now().time() > dtime(9,35):
