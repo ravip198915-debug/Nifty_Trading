@@ -13,6 +13,7 @@ ACCESS_TOKEN ="kfzLpcJyZWnlTfUdwIDB8n4QtPyEFSrJ"
 from kiteconnect import KiteConnect, KiteTicker
 from datetime import datetime, date, time as dtime, timedelta
 import time, threading, sys
+from requests.exceptions import ReadTimeout, ConnectionError
 
 try:
     import winsound
@@ -116,8 +117,13 @@ summary_sent = False
 LAST_TRADE_TIME = None
 PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
+API_COOLDOWN_UNTIL = 0
+API_STABLE_PRINTED = False
 LAST_VALID_SPOT = None
 LAST_SPOT = None
+KWS_LOCK = threading.Lock()
+LAST_KWS_RECONNECT_AT = 0
+KWS_RECONNECT_MIN_GAP = 5
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -147,10 +153,15 @@ kite=KiteConnect(api_key=API_KEY)
 kite.set_access_token(ACCESS_TOKEN)
 
 def safe_kite_call(api_callable, *args, **kwargs):
-    global API_FAILURE_COUNT
+    global API_FAILURE_COUNT, API_COOLDOWN_UNTIL, API_STABLE_PRINTED
+    now = time.time()
+    if API_COOLDOWN_UNTIL > now:
+        return None
     for attempt in range(1, 4):
         try:
             result = api_callable(*args, **kwargs)
+            if result in (None, "", {}, []):
+                raise Exception("Empty response")
             result_text = str(result).lower() if isinstance(result, str) else ""
             if (
                 "502" in result_text
@@ -160,27 +171,37 @@ def safe_kite_call(api_callable, *args, **kwargs):
                 or "gateway timeout" in result_text
             ):
                 raise Exception(f"Gateway/HTML response detected: {result_text[:100]}")
+            if API_FAILURE_COUNT >= 3 or API_COOLDOWN_UNTIL > 0:
+                print("✅ API stable again")
+            API_COOLDOWN_UNTIL = 0
+            API_STABLE_PRINTED = False
             API_FAILURE_COUNT = 0
             return result
         except Exception as e:
             err_text = str(e).lower()
-            if (
+            if isinstance(e, ReadTimeout) or "read timed out" in err_text or "timeout" in err_text:
+                print(f"API retry {attempt}/3 due to timeout")
+            elif isinstance(e, ConnectionError) or "connection" in err_text:
+                print(f"API retry {attempt}/3 due to connection failure")
+            elif (
                 "502" in err_text
                 or "503" in err_text
                 or "bad gateway" in err_text
                 or "<html" in err_text
                 or "gateway timeout" in err_text
             ):
-                print(f"API retry {attempt}/3 due to gateway failure: {e}")
+                print(f"API retry {attempt}/3 due to gateway failure")
             else:
                 print(f"API retry {attempt}/3 due to API error: {e}")
             if attempt < 3:
-                time.sleep(1 + (attempt % 2))
+                time.sleep(min(6, 0.8 * (2 ** (attempt - 1))))
 
     API_FAILURE_COUNT += 1
-    if API_FAILURE_COUNT >= 5:
-        print("API UNSTABLE — PAUSING")
-        time.sleep(30)
+    if API_FAILURE_COUNT >= 3:
+        if not API_STABLE_PRINTED:
+            print("⚠️ API temporarily unstable — cooling down")
+            API_STABLE_PRINTED = True
+        API_COOLDOWN_UNTIL = time.time() + min(30, 5 * API_FAILURE_COUNT)
     return None
 
 print("Token test:",kite.profile()["user_name"])
@@ -492,6 +513,96 @@ def has_any_open_position():
     except Exception:
         return False
     return False
+
+def try_start_entry(side, source_tag="tick"):
+    global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
+    global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
+    global trade_taken, breakout_done, entry_price, quantity
+    global printed_entry
+
+    if day_closed:
+        log_skip("Day closed")
+        return False
+    if trade_taken:
+        log_skip("Trade already taken")
+        return False
+    if not AUTO_READY:
+        log_skip("Auto signal not ready")
+        return False
+    if CPR_TYPE == "WIDE":
+        log_skip("CPR is wide")
+        return False
+    if breakout_done:
+        log_skip("Breakout already used")
+        return False
+    if allowed_side is None:
+        log_skip("Allowed side not set")
+        return False
+    if side != allowed_side:
+        log_skip(f"{side} breakout but {allowed_side} not allowed")
+        return False
+    if FIXED_SYMBOL is None or FIXED_TOKEN is None:
+        log_skip("FIXED_SYMBOL unavailable")
+        return False
+
+    if not printed_entry:
+        print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
+        printed_entry = True
+    ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
+
+    if kws:
+        kws.subscribe([ACTIVE_OPTION_TOKEN])
+        kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
+
+    if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
+        log_skip("Existing position detected")
+        return False
+    if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
+        log_skip("Pending order exists")
+        return False
+    if ENTRY_IN_PROGRESS:
+        log_skip("Entry already in progress")
+        return False
+    if API_FAILURE_COUNT >= 5:
+        log_skip("API unavailable")
+        return False
+    if not wait_for_valid_option_ltp(timeout=5):
+        log_skip("Option LTP not recovered")
+        return False
+    LAST_BLOCK_REASON = None
+
+    ENTRY_IN_PROGRESS = True
+    trade.clear()
+
+    def run_execution(sym_local):
+        global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done
+        try:
+            oid = place_entry_order(sym_local)
+            if not oid:
+                return
+            fill_price, _ = wait_for_order_complete(oid)
+            if not fill_price:
+                return
+            trade_taken = True
+            breakout_done = True
+            ORDER_PLACED = True
+            sl_id, tgt_id, _, _ = place_sl_target(sym_local, fill_price)
+            if not sl_id or not tgt_id:
+                place_live_exit(sym_local)
+                return
+            entry_price = fill_price
+            quantity = LOT_SIZE
+            trade_open = True
+            threading.Thread(
+                target=monitor_orders,
+                args=(sym_local, sl_id, tgt_id),
+                daemon=True
+            ).start()
+        finally:
+            ENTRY_IN_PROGRESS = False
+
+    threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL,), daemon=True).start()
+    return True
 
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
@@ -899,7 +1010,7 @@ def on_ticks(ws, ticks):
                 log_skip("Auto signal not ready")
                 return
             if CPR_TYPE == "WIDE":
-                log_skip("CPR is WIDE")
+                log_skip("CPR is wide")
                 return
             if breakout_done:
                 log_skip("Breakout already used")
@@ -962,91 +1073,7 @@ def on_ticks(ws, ticks):
             else:
                 log_skip("Auto signal not ready")
                 return
-            if FIXED_SYMBOL is None or FIXED_TOKEN is None:
-                log_skip("FIXED_SYMBOL unavailable")
-                return
-
-            if not printed_entry:
-                print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
-                printed_entry = True
-            ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
-
-            if ws:
-                ws.subscribe([ACTIVE_OPTION_TOKEN])
-                ws.set_mode(ws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
-
-            if get_open_qty(ACTIVE_SYMBOL) > 0:
-                log_skip("Existing open position")
-                return
-
-            if has_any_open_position():
-                log_skip("Existing open position")
-                return
-
-            if has_pending_order(ACTIVE_SYMBOL):
-                log_skip("Existing pending order")
-                return
-
-            if has_any_pending_order():
-                log_skip("Existing pending order")
-                return
-
-            if ENTRY_IN_PROGRESS:
-                log_skip("Entry already in progress")
-                return
-
-            if time.time() - LAST_TICK_TIME > 5:
-                log_skip("WebSocket stalled")
-                return
-
-            if API_FAILURE_COUNT >= 5:
-                log_skip("API unavailable")
-                return
-
-            if not wait_for_valid_option_ltp(timeout=5):
-                log_skip("Option LTP not recovered")
-                return
-            LAST_BLOCK_REASON = None
-
-            
-            ENTRY_IN_PROGRESS = True
-            trade.clear()
-
-            def run_execution(sym_local):
-                global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED
-
-                try:
-                    oid = place_entry_order(sym_local)
-                    if not oid:
-                        return
-
-                    fill_price, _ = wait_for_order_complete(oid)
-                    if not fill_price:
-                        return
-
-                    trade_taken = True
-                    breakout_done = True
-                    ORDER_PLACED = True
-
-                    sl_id, tgt_id, _, _ = place_sl_target(sym_local, fill_price)
-                    if not sl_id or not tgt_id:
-                        place_live_exit(sym_local)
-                        return
-
-                    entry_price = fill_price
-                    quantity = LOT_SIZE
-                    trade_open = True
-
-                    threading.Thread(
-                        target=monitor_orders,
-                        args=(sym_local, sl_id, tgt_id),
-                        daemon=True
-                    ).start()
-
-                finally:
-                    ENTRY_IN_PROGRESS = False
-
-            threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL,), daemon=True).start()
+            try_start_entry(side, source_tag="tick")
 
         # ===== POSITION CHECK =====
         if trade_open:
@@ -1077,6 +1104,34 @@ def safe_kws_stop():
     except Exception as e:
         print("KWS stop error:", e)
 
+def safe_kws_reconnect():
+    global kws, WS_STOPPED, LAST_TICK_TIME, LAST_KWS_RECONNECT_AT
+    with KWS_LOCK:
+        now = time.time()
+        if now - LAST_KWS_RECONNECT_AT < KWS_RECONNECT_MIN_GAP:
+            return
+        LAST_KWS_RECONNECT_AT = now
+        print("🔄 WebSocket reconnect attempt...")
+        try:
+            kws.close()
+        except Exception:
+            pass
+        time.sleep(1)
+        kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+        kws.on_ticks = on_ticks
+        kws.on_connect = on_connect
+        kws.on_close = on_close
+        WS_STOPPED = False
+        kws.connect(threaded=True)
+        LAST_TICK_TIME = time.time()
+        if ACTIVE_OPTION_TOKEN:
+            try:
+                kws.subscribe([ACTIVE_OPTION_TOKEN])
+                kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
+            except Exception:
+                pass
+        print("✅ WebSocket reconnected")
+
 # ================= START =================
 
 print_header()
@@ -1097,22 +1152,32 @@ def heartbeat():
         # Fetch spot price
         fetch_spot()
 
+        if (
+            candle_done
+            and AUTO_READY
+            and not trade_open
+            and not ORDER_PLACED
+            and not trade_taken
+            and not day_closed
+            and spot_ltp is not None
+            and datetime.now().time() < LAST_ENTRY_TIME
+        ):
+            fallback_side = None
+            if allowed_side == "CE" and spot_ltp >= candle["high"] + 3:
+                fallback_side = "CE"
+            elif allowed_side == "PE" and spot_ltp <= candle["low"] - 3:
+                fallback_side = "PE"
+            else:
+                log_skip("Breakout not reached")
+            if fallback_side:
+                print("⚡ Breakout detected via fallback engine")
+                try_start_entry(fallback_side, source_tag="fallback")
+
         # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
-        if time.time() - LAST_TICK_TIME > 5 and not day_closed:
+        if time.time() - LAST_TICK_TIME > 10 and not day_closed:
             print("⚠️ WebSocket stalled — reconnecting safely")
             send_telegram("⚠️ WebSocket stalled — reconnecting safely")
-            try:
-                kws.close()
-            except Exception:
-                pass
-            time.sleep(1)
-            kws = KiteTicker(API_KEY, ACCESS_TOKEN)
-            kws.on_ticks = on_ticks
-            kws.on_connect = on_connect
-            kws.on_close = on_close
-            WS_STOPPED = False
-            kws.connect(threaded=True)
-            LAST_TICK_TIME = time.time()
+            safe_kws_reconnect()
 
         # Fetch 9:30 candle once
         if not candle_done and datetime.now().time() > dtime(9,35):
