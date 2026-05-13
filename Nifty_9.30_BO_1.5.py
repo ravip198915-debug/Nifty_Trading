@@ -622,9 +622,12 @@ def try_start_entry(side, source_tag="tick"):
 def log_skip(reason):
     global PRINTED_BLOCK_REASONS
 
+    # Ignore non-actionable / noisy conditions
+    if reason in ["Breakout not reached"]:
+        return
+
     now = time.time()
 
-    # print only once per cooldown
     if (
         reason not in PRINTED_BLOCK_REASONS
         or now - PRINTED_BLOCK_REASONS[reason] > BLOCK_PRINT_COOLDOWN
@@ -942,6 +945,9 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
+                if LAST_SPOT is not None and abs(spot_ltp - LAST_SPOT) > 10:
+                    PRINTED_BLOCK_REASONS.clear()
+
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
 
@@ -1074,8 +1080,6 @@ def on_ticks(ws, ticks):
                         log_skip("CE breakout but CE not allowed")
                     elif crossed_low and allowed_side != "PE":
                         log_skip("PE breakout but PE not allowed")
-                    else:
-                        log_skip("Breakout not reached")
                     return
 
 
@@ -1094,8 +1098,6 @@ def on_ticks(ws, ticks):
                         log_skip("CE breakout but CE not allowed")
                     elif crossed_low and allowed_side != "PE":
                         log_skip("PE breakout but PE not allowed")
-                    else:
-                        log_skip("Breakout not reached")
                     return
 
             else:
