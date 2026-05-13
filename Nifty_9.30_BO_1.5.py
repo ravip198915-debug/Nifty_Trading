@@ -624,19 +624,12 @@ def try_start_entry(side, source_tag="tick"):
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
 def log_skip(reason):
-    global PRINTED_BLOCK_REASONS, CPR_BLOCK_HANDLED
-
-    # 🚫 CPR handled globally (do nothing here)
-    if reason == "CPR is wide":
-        print(f"🚫 TRADE BLOCKED: {reason}")
-        send_telegram(f"🚫 TRADE BLOCKED: {reason}")
-        return
+    global PRINTED_BLOCK_REASONS
 
     # 🚫 Ignore noisy condition
     if reason in ["Breakout not reached"]:
         return
 
-    # ✅ Other reasons (with cooldown)
     now = time.time()
 
     if (
