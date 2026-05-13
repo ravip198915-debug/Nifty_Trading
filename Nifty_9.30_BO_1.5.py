@@ -1273,6 +1273,20 @@ def heartbeat():
             global FALLBACK_TRIGGERED
 
             if fallback_side and not FALLBACK_TRIGGERED:
+
+                # ✅ Only allow if trade conditions are valid
+                if not AUTO_READY:
+                    return
+
+                if CPR_TYPE == "WIDE":
+                    return
+
+                if trade_taken or day_closed:
+                    return
+
+                if allowed_side is None or fallback_side != allowed_side:
+                    return
+
                 print("⚡ Breakout detected via fallback engine")
                 FALLBACK_TRIGGERED = True
                 try_start_entry(fallback_side, source_tag="fallback")
