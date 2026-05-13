@@ -1176,6 +1176,27 @@ def restart_kws():
         # Connect again
         kws.connect(threaded=True)
 
+        # Wait briefly for socket readiness
+        time.sleep(1)
+
+        # Restore subscriptions immediately
+        tokens = [SPOT_TOKEN]
+
+        if ACTIVE_OPTION_TOKEN:
+            tokens.append(ACTIVE_OPTION_TOKEN)
+
+        # Remove duplicates safely
+        tokens = list(dict.fromkeys(tokens))
+
+        try:
+            kws.subscribe(tokens)
+            kws.set_mode(kws.MODE_LTP, tokens)
+
+            print("✅ Tokens resubscribed after reconnect")
+
+        except Exception as e:
+            print("Resubscribe error:", e)
+
         LAST_TICK_TIME = time.time()
 
         print("🔄 WebSocket reconnected successfully")
