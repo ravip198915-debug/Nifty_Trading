@@ -104,7 +104,6 @@ FIXED_SYMBOL=None
 FIXED_TOKEN=None
 ORDER_PLACED=False
 BLOCK_MSG_SHOWN=False
-LAST_BLOCK_REASON=None
 day_closed = False
 SCRIPT_RUNNING = True
 WS_STOPPED = False
@@ -125,6 +124,8 @@ LAST_SPOT = None
 KWS_LOCK = threading.Lock()
 LAST_KWS_RECONNECT_AT = 0
 KWS_RECONNECT_MIN_GAP = 5
+PRINTED_BLOCK_REASONS = {}
+BLOCK_PRINT_COOLDOWN = 60   # seconds
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -619,11 +620,19 @@ def try_start_entry(side, source_tag="tick"):
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
 def log_skip(reason):
-    global LAST_BLOCK_REASON
-    if LAST_BLOCK_REASON != reason:
+    global PRINTED_BLOCK_REASONS
+
+    now = time.time()
+
+    # print only once per cooldown
+    if (
+        reason not in PRINTED_BLOCK_REASONS
+        or now - PRINTED_BLOCK_REASONS[reason] > BLOCK_PRINT_COOLDOWN
+    ):
         print(f"🚫 TRADE BLOCKED: {reason}")
         send_telegram(f"🚫 TRADE BLOCKED: {reason}")
-        LAST_BLOCK_REASON = reason
+
+        PRINTED_BLOCK_REASONS[reason] = now
 
 
 # ================= OPTION LTP RECOVERY (NEW FIX) =================
@@ -1242,8 +1251,6 @@ def heartbeat():
                 fallback_side = "CE"
             elif allowed_side == "PE" and spot_ltp <= candle["low"] - 3:
                 fallback_side = "PE"
-            else:
-                log_skip("Breakout not reached")
             if fallback_side:
                 print("⚡ Breakout detected via fallback engine")
                 try_start_entry(fallback_side, source_tag="fallback")
