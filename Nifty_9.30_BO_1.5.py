@@ -105,6 +105,7 @@ FIXED_TOKEN=None
 ORDER_PLACED=False
 BLOCK_MSG_SHOWN=False
 day_closed = False
+DAY_CLOSED_PRINTED = False
 SCRIPT_RUNNING = True
 WS_STOPPED = False
 LAST_TICK_TIME = time.time()
@@ -925,6 +926,7 @@ def on_ticks(ws, ticks):
     global FIXED_SYMBOL, FIXED_TOKEN
     global ORDER_PLACED, BLOCK_MSG_SHOWN, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global spot_ltp, option_ltp, day_closed, LAST_VALID_SPOT, LAST_SPOT
+    global DAY_CLOSED_PRINTED
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
@@ -1032,8 +1034,9 @@ def on_ticks(ws, ticks):
 
         # ===== WAIT CONDITIONS =====
         if not candle_done or day_closed:
-            if day_closed:
+            if day_closed and not DAY_CLOSED_PRINTED:
                 log_skip("Day closed")
+                DAY_CLOSED_PRINTED = True
             return
 
         # ===== DAY CLOSE =====
