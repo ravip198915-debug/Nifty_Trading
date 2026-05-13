@@ -126,8 +126,7 @@ LAST_KWS_RECONNECT_AT = 0
 KWS_RECONNECT_MIN_GAP = 5
 PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
-LAST_LOG_RESET_TIME = 0
-LOG_RESET_COOLDOWN = 60   # seconds
+CPR_BLOCK_PRINTED = False
 FALLBACK_TRIGGERED = False
 
 
@@ -623,7 +622,13 @@ def try_start_entry(side, source_tag="tick"):
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
 def log_skip(reason):
-    global PRINTED_BLOCK_REASONS
+    global PRINTED_BLOCK_REASONS, CPR_BLOCK_PRINTED
+
+    # Special handling for CPR
+    if reason == "CPR is wide":
+        if CPR_BLOCK_PRINTED:
+            return
+        CPR_BLOCK_PRINTED = True
 
     # Ignore non-actionable / noisy conditions
     if reason in ["Breakout not reached"]:
@@ -915,7 +920,6 @@ def on_ticks(ws, ticks):
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
-    global LAST_LOG_RESET_TIME
     global FALLBACK_TRIGGERED
 
     try:
@@ -957,13 +961,6 @@ def on_ticks(ws, ticks):
                 elif allowed_side == "PE" and spot_ltp > candle["low"] - 2:
                     FALLBACK_TRIGGERED = False
 
-                if (
-                    LAST_SPOT is not None
-                    and abs(spot_ltp - LAST_SPOT) > 15
-                    and time.time() - LAST_LOG_RESET_TIME > LOG_RESET_COOLDOWN
-                ):
-                    PRINTED_BLOCK_REASONS.clear()
-                    LAST_LOG_RESET_TIME = time.time()
 
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
