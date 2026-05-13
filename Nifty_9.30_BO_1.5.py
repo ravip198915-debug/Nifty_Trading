@@ -126,7 +126,6 @@ LAST_KWS_RECONNECT_AT = 0
 KWS_RECONNECT_MIN_GAP = 5
 PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
-CPR_BLOCK_PRINTED = False
 CPR_BLOCK_HANDLED = False
 FALLBACK_TRIGGERED = False
 
@@ -625,13 +624,10 @@ def try_start_entry(side, source_tag="tick"):
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
 def log_skip(reason):
-    global PRINTED_BLOCK_REASONS, CPR_BLOCK_PRINTED
+    global PRINTED_BLOCK_REASONS, CPR_BLOCK_HANDLED
 
-    # 🚫 Print CPR only once for entire day
+    # 🚫 CPR handled globally (do nothing here)
     if reason == "CPR is wide":
-        if CPR_BLOCK_PRINTED:
-            return
-        CPR_BLOCK_PRINTED = True
         print(f"🚫 TRADE BLOCKED: {reason}")
         send_telegram(f"🚫 TRADE BLOCKED: {reason}")
         return
