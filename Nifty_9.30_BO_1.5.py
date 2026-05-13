@@ -622,9 +622,12 @@ def try_start_entry(side, source_tag="tick"):
 def log_skip(reason):
     global PRINTED_BLOCK_REASONS
 
+    # ❌ Ignore most frequent noise
+    if reason in ["Breakout not reached"]:
+        return
+
     now = time.time()
 
-    # print only once per cooldown
     if (
         reason not in PRINTED_BLOCK_REASONS
         or now - PRINTED_BLOCK_REASONS[reason] > BLOCK_PRINT_COOLDOWN
@@ -944,6 +947,14 @@ def on_ticks(ws, ticks):
 
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
+
+        # Avoid repeated block logs when price not changing
+        if LAST_SPOT is not None and spot_ltp == LAST_SPOT:
+            return
+
+        # Reset block reasons only when market condition meaningfully changes
+        if LAST_SPOT is not None and spot_ltp is not None and abs(spot_ltp - LAST_SPOT) > 5:
+            PRINTED_BLOCK_REASONS.clear()
 
         # ================= MANUAL ENTRY DETECTION =================
         if not trade_open and not MANUAL_HANDLED:
