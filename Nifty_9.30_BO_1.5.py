@@ -1124,10 +1124,7 @@ def safe_kws_stop():
         print("KWS stop error:", e)
 
 def restart_kws():
-    global kws
-    global WS_STOPPED
-    global LAST_TICK_TIME
-    global LAST_KWS_RECONNECT_AT
+    global kws, WS_STOPPED, LAST_TICK_TIME, LAST_KWS_RECONNECT_AT
 
     with KWS_LOCK:
 
@@ -1142,26 +1139,25 @@ def restart_kws():
         print("🔄 WebSocket reconnect attempt...")
 
         try:
-
-            # STOP AUTO RETRY FIRST
+            # 🔥 CRITICAL: STOP AUTO RECONNECT LOOP
             try:
                 kws.stop_retry()
             except Exception:
                 pass
 
-            # CLOSE OLD SOCKET
+            # Close existing connection
             try:
                 kws.close()
             except Exception:
                 pass
 
-            # WAIT FOR CLEANUP
+            # Allow cleanup
             time.sleep(3)
 
         except Exception as e:
-            print("Old websocket cleanup error:", e)
+            print("WebSocket cleanup error:", e)
 
-        # CREATE FRESH INSTANCE
+        # Create fresh connection
         kws = KiteTicker(
             API_KEY,
             ACCESS_TOKEN,
@@ -1170,14 +1166,14 @@ def restart_kws():
             reconnect_max_delay=60
         )
 
-        # REASSIGN CALLBACKS
+        # Reattach callbacks
         kws.on_ticks = on_ticks
         kws.on_connect = on_connect
         kws.on_close = on_close
 
         WS_STOPPED = False
 
-        # CONNECT
+        # Connect again
         kws.connect(threaded=True)
 
         LAST_TICK_TIME = time.time()
