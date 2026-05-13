@@ -1176,8 +1176,16 @@ def restart_kws():
         # Connect again
         kws.connect(threaded=True)
 
-        # Wait briefly for socket readiness
-        time.sleep(1)
+        # Smart websocket readiness wait
+        for _ in range(10):
+
+            try:
+                if kws.is_connected():
+                    break
+            except Exception:
+                pass
+
+            time.sleep(0.2)
 
         # Restore subscriptions immediately
         tokens = [SPOT_TOKEN]
