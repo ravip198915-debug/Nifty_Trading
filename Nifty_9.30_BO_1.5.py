@@ -626,10 +626,15 @@ def try_start_entry(side, source_tag="tick"):
 def log_skip(reason):
     global PRINTED_BLOCK_REASONS
 
-    # 🚫 CPR handled outside → no cooldown logic here
+    # 🚫 CPR MUST PRINT ONLY ONCE (NO COOLDOWN)
     if reason == "CPR is wide":
+        if "CPR is wide" in PRINTED_BLOCK_REASONS:
+            return
+
         print(f"🚫 TRADE BLOCKED: {reason}")
         send_telegram(f"🚫 TRADE BLOCKED: {reason}")
+
+        PRINTED_BLOCK_REASONS["CPR is wide"] = time.time()
         return
 
     # 🚫 Ignore noisy condition
