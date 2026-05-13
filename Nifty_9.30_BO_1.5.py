@@ -527,7 +527,6 @@ def try_start_entry(side, source_tag="tick"):
     global printed_entry, ENTRY_BLOCK_PRINTED
 
     if day_closed:
-        log_skip("Day closed")
         return False
     if trade_taken:
         log_skip("Trade already taken")
@@ -539,16 +538,12 @@ def try_start_entry(side, source_tag="tick"):
         log_skip("CPR is wide")
         return False
     if breakout_done:
-        log_skip("Breakout already used")
         return False
     if allowed_side is None:
-        log_skip("Allowed side not set")
         return False
     if side != allowed_side:
-        log_skip(f"{side} breakout but {allowed_side} not allowed")
         return False
     if FIXED_SYMBOL is None or FIXED_TOKEN is None:
-        log_skip("FIXED_SYMBOL unavailable")
         return False
 
     if not printed_entry:
@@ -561,26 +556,23 @@ def try_start_entry(side, source_tag="tick"):
         kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
 
     if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
-        log_skip("Existing position detected")
         return False
     if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
         log_skip("Pending order exists")
         return False
     if ENTRY_IN_PROGRESS:
-        log_skip("Entry already in progress")
+        log_skip("Entry in progress")
         return False
     if API_FAILURE_COUNT >= 3:
         if not ENTRY_BLOCK_PRINTED:
             print("⚠️ Entry blocked due to API instability")
             ENTRY_BLOCK_PRINTED = True
-        log_skip("API unstable for entries")
+        log_skip("API unstable")
         return False
     ENTRY_BLOCK_PRINTED = False
     if API_FAILURE_COUNT >= 5:
-        log_skip("API unavailable")
         return False
     if not wait_for_valid_option_ltp(timeout=5):
-        log_skip("Option LTP not recovered")
         return False
     LAST_BLOCK_REASON = None
 
@@ -622,9 +614,12 @@ def try_start_entry(side, source_tag="tick"):
 def log_skip(reason):
     global PRINTED_BLOCK_REASONS
 
+    # Ignore noisy conditions completely
+    if reason in ["Breakout not reached"]:
+        return
+
     now = time.time()
 
-    # print only once per cooldown
     if (
         reason not in PRINTED_BLOCK_REASONS
         or now - PRINTED_BLOCK_REASONS[reason] > BLOCK_PRINT_COOLDOWN
@@ -942,6 +937,9 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
+                if LAST_SPOT is not None and abs(spot_ltp - LAST_SPOT) > 10:
+                    PRINTED_BLOCK_REASONS.clear()
+
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
 
@@ -1004,8 +1002,7 @@ def on_ticks(ws, ticks):
         # ===== WAIT CONDITIONS =====
         if not candle_done or day_closed:
             if day_closed:
-                log_skip("Day closed")
-            return
+                return
 
         # ===== DAY CLOSE =====
         if now >= FORCE_EXIT_TIME and not day_closed:
@@ -1031,8 +1028,7 @@ def on_ticks(ws, ticks):
                 if trade_taken:
                     log_skip("Trade already taken")
                 else:
-                    log_skip("Day closed")
-                return
+                    return
 
             if not AUTO_READY:
                 log_skip("Auto signal not ready")
@@ -1041,11 +1037,9 @@ def on_ticks(ws, ticks):
                 log_skip("CPR is wide")
                 return
             if breakout_done:
-                log_skip("Breakout already used")
                 return
 
             if allowed_side is None:
-                log_skip("Allowed side not set")
                 return
 
             side = None
@@ -1070,12 +1064,6 @@ def on_ticks(ws, ticks):
                     side = "PE"
 
                 else:
-                    if crossed_high and allowed_side != "CE":
-                        log_skip("CE breakout but CE not allowed")
-                    elif crossed_low and allowed_side != "PE":
-                        log_skip("PE breakout but PE not allowed")
-                    else:
-                        log_skip("Breakout not reached")
                     return
 
 
@@ -1090,12 +1078,6 @@ def on_ticks(ws, ticks):
                     side = "PE"
 
                 else:
-                    if crossed_high and allowed_side != "CE":
-                        log_skip("CE breakout but CE not allowed")
-                    elif crossed_low and allowed_side != "PE":
-                        log_skip("PE breakout but PE not allowed")
-                    else:
-                        log_skip("Breakout not reached")
                     return
 
             else:
