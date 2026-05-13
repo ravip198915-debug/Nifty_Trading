@@ -1283,16 +1283,16 @@ def heartbeat():
 
                 # ✅ Only allow if trade conditions are valid
                 if not AUTO_READY:
-                    return
+                    continue
 
                 if CPR_TYPE == "WIDE":
-                    return
+                    continue
 
                 if trade_taken or day_closed:
-                    return
+                    continue
 
                 if allowed_side is None or fallback_side != allowed_side:
-                    return
+                    continue
 
                 print("⚡ Breakout detected via fallback engine")
                 FALLBACK_TRIGGERED = True
