@@ -126,6 +126,8 @@ LAST_KWS_RECONNECT_AT = 0
 KWS_RECONNECT_MIN_GAP = 5
 PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
+LAST_LOG_RESET_TIME = 0
+LOG_RESET_COOLDOWN = 60   # seconds
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -945,8 +947,15 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
-                if LAST_SPOT is not None and abs(spot_ltp - LAST_SPOT) > 10:
+                global LAST_LOG_RESET_TIME
+
+                if (
+                    LAST_SPOT is not None
+                    and abs(spot_ltp - LAST_SPOT) > 15
+                    and time.time() - LAST_LOG_RESET_TIME > LOG_RESET_COOLDOWN
+                ):
                     PRINTED_BLOCK_REASONS.clear()
+                    LAST_LOG_RESET_TIME = time.time()
 
             if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
                 option_ltp = t["last_price"]
