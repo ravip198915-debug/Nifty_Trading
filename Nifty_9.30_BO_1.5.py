@@ -950,10 +950,11 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
-                if (
-                    LAST_SPOT is not None
-                    and abs(spot_ltp - LAST_SPOT) > 10
-                ):
+                # Reset fallback only when breakout condition is no longer valid
+                if allowed_side == "CE" and spot_ltp < candle["high"] + 2:
+                    FALLBACK_TRIGGERED = False
+
+                elif allowed_side == "PE" and spot_ltp > candle["low"] - 2:
                     FALLBACK_TRIGGERED = False
 
                 if (
