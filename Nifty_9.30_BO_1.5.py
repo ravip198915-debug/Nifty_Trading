@@ -528,6 +528,8 @@ def try_start_entry(side, source_tag="tick"):
     global trade_taken, breakout_done, entry_price, quantity
     global printed_entry, ENTRY_BLOCK_PRINTED
 
+    PRINTED_BLOCK_REASONS.clear()
+
     if day_closed:
         log_skip("Day closed")
         return False
@@ -632,6 +634,10 @@ def log_skip(reason):
 
     # Ignore non-actionable / noisy conditions
     if reason in ["Breakout not reached"]:
+        return
+
+    # ❌ Skip most noisy message completely
+    if reason == "Breakout not reached":
         return
 
     now = time.time()
