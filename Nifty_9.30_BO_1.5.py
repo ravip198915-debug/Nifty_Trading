@@ -127,6 +127,7 @@ KWS_RECONNECT_MIN_GAP = 5
 PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
 CPR_BLOCK_PRINTED = False
+CPR_BLOCK_HANDLED = False
 FALLBACK_TRIGGERED = False
 
 
@@ -925,6 +926,7 @@ def on_ticks(ws, ticks):
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
     global FALLBACK_TRIGGERED
+    global CPR_BLOCK_HANDLED
 
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
@@ -1062,7 +1064,9 @@ def on_ticks(ws, ticks):
                 log_skip("Auto signal not ready")
                 return
             if CPR_TYPE == "WIDE":
-                log_skip("CPR is wide")
+                if not CPR_BLOCK_HANDLED:
+                    log_skip("CPR is wide")
+                    CPR_BLOCK_HANDLED = True
                 return
             if breakout_done:
                 log_skip("Breakout already used")
