@@ -119,6 +119,7 @@ PRINTED_ONCE = False
 API_FAILURE_COUNT = 0
 API_COOLDOWN_UNTIL = 0
 API_STABLE_PRINTED = False
+ENTRY_BLOCK_PRINTED = False
 LAST_VALID_SPOT = None
 LAST_SPOT = None
 KWS_LOCK = threading.Lock()
@@ -194,10 +195,14 @@ def safe_kite_call(api_callable, *args, **kwargs):
             else:
                 print(f"API retry {attempt}/3 due to API error: {e}")
             if attempt < 3:
-                time.sleep(min(6, 0.8 * (2 ** (attempt - 1))))
+                time.sleep(2 ** attempt)
 
     API_FAILURE_COUNT += 1
-    if API_FAILURE_COUNT >= 3:
+    if API_FAILURE_COUNT >= 5:
+        print("🚫 API UNSTABLE — Cooling down 60 seconds")
+        API_COOLDOWN_UNTIL = time.time() + 60
+        API_STABLE_PRINTED = True
+    elif API_FAILURE_COUNT >= 3:
         if not API_STABLE_PRINTED:
             print("⚠️ API temporarily unstable — cooling down")
             API_STABLE_PRINTED = True
@@ -518,7 +523,7 @@ def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry
+    global printed_entry, ENTRY_BLOCK_PRINTED
 
     if day_closed:
         log_skip("Day closed")
@@ -563,6 +568,13 @@ def try_start_entry(side, source_tag="tick"):
     if ENTRY_IN_PROGRESS:
         log_skip("Entry already in progress")
         return False
+    if API_FAILURE_COUNT >= 3:
+        if not ENTRY_BLOCK_PRINTED:
+            print("⚠️ Entry blocked due to API instability")
+            ENTRY_BLOCK_PRINTED = True
+        log_skip("API unstable for entries")
+        return False
+    ENTRY_BLOCK_PRINTED = False
     if API_FAILURE_COUNT >= 5:
         log_skip("API unavailable")
         return False
@@ -859,8 +871,13 @@ def place_live_exit(sym):
 # ================= WEBSOCKET =================
 def on_connect(ws,r):
     print("WebSocket connected")
-    ws.subscribe([SPOT_TOKEN])
-    ws.set_mode(ws.MODE_LTP,[SPOT_TOKEN])
+    tokens = [SPOT_TOKEN]
+    if ACTIVE_OPTION_TOKEN:
+        tokens.append(ACTIVE_OPTION_TOKEN)
+    tokens = list(dict.fromkeys(tokens))
+    ws.subscribe(tokens)
+    ws.set_mode(ws.MODE_LTP, tokens)
+    print("Tokens restored after reconnect")
 
 def on_close(ws, c, r):
 
@@ -870,6 +887,8 @@ def on_close(ws, c, r):
         return
 
     print("WebSocket closed - waiting auto reconnect")
+    print("⚠️ WebSocket disconnected — attempting recovery")
+    threading.Thread(target=restart_kws, daemon=True).start()
 
 # ================= CORE ENGINE =================
 def on_ticks(ws, ticks):
@@ -1104,7 +1123,7 @@ def safe_kws_stop():
     except Exception as e:
         print("KWS stop error:", e)
 
-def safe_kws_reconnect():
+def restart_kws():
     global kws, WS_STOPPED, LAST_TICK_TIME, LAST_KWS_RECONNECT_AT
     with KWS_LOCK:
         now = time.time()
@@ -1116,21 +1135,30 @@ def safe_kws_reconnect():
             kws.close()
         except Exception:
             pass
-        time.sleep(1)
-        kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+        time.sleep(2)
+        kws = KiteTicker(
+            API_KEY,
+            ACCESS_TOKEN,
+            reconnect=True,
+            reconnect_max_tries=50,
+            reconnect_max_delay=60
+        )
         kws.on_ticks = on_ticks
         kws.on_connect = on_connect
         kws.on_close = on_close
         WS_STOPPED = False
         kws.connect(threaded=True)
         LAST_TICK_TIME = time.time()
+        tokens = [SPOT_TOKEN]
         if ACTIVE_OPTION_TOKEN:
-            try:
-                kws.subscribe([ACTIVE_OPTION_TOKEN])
-                kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
-            except Exception:
-                pass
-        print("✅ WebSocket reconnected")
+            tokens.append(ACTIVE_OPTION_TOKEN)
+        tokens = list(dict.fromkeys(tokens))
+        try:
+            kws.subscribe(tokens)
+            kws.set_mode(kws.MODE_LTP, tokens)
+        except Exception:
+            pass
+        print("🔄 WebSocket reconnected successfully")
 
 # ================= START =================
 
@@ -1138,7 +1166,13 @@ print_header()
 
 recover_position()
 
-kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+kws = KiteTicker(
+    API_KEY,
+    ACCESS_TOKEN,
+    reconnect=True,
+    reconnect_max_tries=50,
+    reconnect_max_delay=60
+)
 kws.on_ticks = on_ticks
 kws.on_connect = on_connect
 kws.on_close = on_close
@@ -1175,9 +1209,9 @@ def heartbeat():
 
         # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
         if time.time() - LAST_TICK_TIME > 10 and not day_closed:
-            print("⚠️ WebSocket stalled — reconnecting safely")
-            send_telegram("⚠️ WebSocket stalled — reconnecting safely")
-            safe_kws_reconnect()
+            print("⚠️ WebSocket stalled — reconnecting")
+            send_telegram("⚠️ WebSocket stalled — reconnecting")
+            restart_kws()
 
         # Fetch 9:30 candle once
         if not candle_done and datetime.now().time() > dtime(9,35):
