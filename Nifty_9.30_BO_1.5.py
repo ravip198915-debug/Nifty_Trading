@@ -527,7 +527,7 @@ def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry, ENTRY_BLOCK_PRINTED
+    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED
 
     if day_closed:
         log_skip("Day closed")
@@ -539,7 +539,9 @@ def try_start_entry(side, source_tag="tick"):
         log_skip("Auto signal not ready")
         return False
     if CPR_TYPE == "WIDE":
-        log_skip("CPR is wide")
+        if not CPR_BLOCK_HANDLED:
+            log_skip("CPR is wide")
+            CPR_BLOCK_HANDLED = True
         return False
     if breakout_done:
         log_skip("Breakout already used")
