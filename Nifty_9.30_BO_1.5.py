@@ -526,6 +526,8 @@ def try_start_entry(side, source_tag="tick"):
     global trade_taken, breakout_done, entry_price, quantity
     global printed_entry, ENTRY_BLOCK_PRINTED
 
+    PRINTED_BLOCK_REASONS.clear()
+
     if day_closed:
         log_skip("Day closed")
         return False
@@ -622,9 +624,12 @@ def try_start_entry(side, source_tag="tick"):
 def log_skip(reason):
     global PRINTED_BLOCK_REASONS
 
+    # ❌ Skip most noisy message completely
+    if reason == "Breakout not reached":
+        return
+
     now = time.time()
 
-    # print only once per cooldown
     if (
         reason not in PRINTED_BLOCK_REASONS
         or now - PRINTED_BLOCK_REASONS[reason] > BLOCK_PRINT_COOLDOWN
