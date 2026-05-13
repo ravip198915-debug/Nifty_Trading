@@ -1124,18 +1124,44 @@ def safe_kws_stop():
         print("KWS stop error:", e)
 
 def restart_kws():
-    global kws, WS_STOPPED, LAST_TICK_TIME, LAST_KWS_RECONNECT_AT
+    global kws
+    global WS_STOPPED
+    global LAST_TICK_TIME
+    global LAST_KWS_RECONNECT_AT
+
     with KWS_LOCK:
+
         now = time.time()
+
+        # Prevent reconnect spam
         if now - LAST_KWS_RECONNECT_AT < KWS_RECONNECT_MIN_GAP:
             return
+
         LAST_KWS_RECONNECT_AT = now
+
         print("🔄 WebSocket reconnect attempt...")
+
         try:
-            kws.close()
-        except Exception:
-            pass
-        time.sleep(2)
+
+            # STOP AUTO RETRY FIRST
+            try:
+                kws.stop_retry()
+            except Exception:
+                pass
+
+            # CLOSE OLD SOCKET
+            try:
+                kws.close()
+            except Exception:
+                pass
+
+            # WAIT FOR CLEANUP
+            time.sleep(3)
+
+        except Exception as e:
+            print("Old websocket cleanup error:", e)
+
+        # CREATE FRESH INSTANCE
         kws = KiteTicker(
             API_KEY,
             ACCESS_TOKEN,
@@ -1143,21 +1169,19 @@ def restart_kws():
             reconnect_max_tries=50,
             reconnect_max_delay=60
         )
+
+        # REASSIGN CALLBACKS
         kws.on_ticks = on_ticks
         kws.on_connect = on_connect
         kws.on_close = on_close
+
         WS_STOPPED = False
+
+        # CONNECT
         kws.connect(threaded=True)
+
         LAST_TICK_TIME = time.time()
-        tokens = [SPOT_TOKEN]
-        if ACTIVE_OPTION_TOKEN:
-            tokens.append(ACTIVE_OPTION_TOKEN)
-        tokens = list(dict.fromkeys(tokens))
-        try:
-            kws.subscribe(tokens)
-            kws.set_mode(kws.MODE_LTP, tokens)
-        except Exception:
-            pass
+
         print("🔄 WebSocket reconnected successfully")
 
 # ================= START =================
