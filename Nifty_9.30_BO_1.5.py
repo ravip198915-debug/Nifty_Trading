@@ -128,6 +128,7 @@ PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
 LAST_LOG_RESET_TIME = 0
 LOG_RESET_COOLDOWN = 60   # seconds
+FALLBACK_TRIGGERED = False
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -915,6 +916,7 @@ def on_ticks(ws, ticks):
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
     global LAST_LOG_RESET_TIME
+    global FALLBACK_TRIGGERED
 
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
@@ -948,6 +950,11 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
+                if (
+                    LAST_SPOT is not None
+                    and abs(spot_ltp - LAST_SPOT) > 10
+                ):
+                    FALLBACK_TRIGGERED = False
 
                 if (
                     LAST_SPOT is not None
@@ -1262,8 +1269,11 @@ def heartbeat():
                 fallback_side = "CE"
             elif allowed_side == "PE" and spot_ltp <= candle["low"] - 3:
                 fallback_side = "PE"
-            if fallback_side:
+            global FALLBACK_TRIGGERED
+
+            if fallback_side and not FALLBACK_TRIGGERED:
                 print("⚡ Breakout detected via fallback engine")
+                FALLBACK_TRIGGERED = True
                 try_start_entry(fallback_side, source_tag="fallback")
 
         # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
