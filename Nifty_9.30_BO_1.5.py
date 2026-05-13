@@ -914,6 +914,7 @@ def on_ticks(ws, ticks):
     global trade_taken, breakout_done, entry_price, exit_price, quantity, pnl
     global printed_entry, printed_bad_tick, summary_sent, LAST_TICK_TIME, LAST_TRADE_TIME
     global MANUAL_HANDLED
+    global LAST_LOG_RESET_TIME
 
     try:
         if WS_STOPPED or not SCRIPT_RUNNING:
@@ -947,7 +948,6 @@ def on_ticks(ws, ticks):
                 spot_ltp = new_price
                 LAST_VALID_SPOT = new_price
 
-                global LAST_LOG_RESET_TIME
 
                 if (
                     LAST_SPOT is not None
