@@ -546,6 +546,7 @@ def set_entry_reserved():
 
 def reset_entry_reserved():
     global ENTRY_RESERVED, ENTRY_RESERVED_AT
+
     ENTRY_RESERVED = False
     ENTRY_RESERVED_AT = 0
 
@@ -674,8 +675,9 @@ def try_start_entry(side, source_tag="tick"):
 
     def run_execution(sym_local, exec_id):
         global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, EXECUTION_ID
-        if exec_id != EXECUTION_ID:
-            return
+        with ENTRY_LOCK:
+            if exec_id != EXECUTION_ID:
+                return
         ENTRY_IN_PROGRESS = True
         try:
             oid = place_entry_order(sym_local)
@@ -713,7 +715,11 @@ def try_start_entry(side, source_tag="tick"):
         reset_entry_reserved()
         return False
     try:
-        t = threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL, current_execution_id), daemon=True)
+        t = threading.Thread(
+            target=run_execution,
+            args=(ACTIVE_SYMBOL, current_execution_id),
+            daemon=True
+        )
         t.start()
         return True
     except Exception as e:
