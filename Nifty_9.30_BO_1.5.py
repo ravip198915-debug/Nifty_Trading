@@ -660,11 +660,11 @@ def try_start_entry(side, source_tag="tick"):
         return False
     LAST_BLOCK_REASON = None
 
-    ENTRY_IN_PROGRESS = True
     trade.clear()
 
     def run_execution(sym_local):
         global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED
+        ENTRY_IN_PROGRESS = True
         try:
             oid = place_entry_order(sym_local)
             if not oid:
