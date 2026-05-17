@@ -538,14 +538,12 @@ def has_any_open_position():
 
 def set_entry_reserved():
     global ENTRY_RESERVED
-    with ENTRY_LOCK:
-        ENTRY_RESERVED = True
+    ENTRY_RESERVED = True
 
 
 def reset_entry_reserved():
     global ENTRY_RESERVED
-    with ENTRY_LOCK:
-        ENTRY_RESERVED = False
+    ENTRY_RESERVED = False
 
 def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
