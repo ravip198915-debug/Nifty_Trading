@@ -544,14 +544,16 @@ def try_start_entry(side, source_tag="tick"):
     if not ENTRY_LOCK.acquire(blocking=False):
         return False
 
-    now = time.time()
+    try:
+        now = time.time()
 
-    if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
+        if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
+            return False
+
+        LAST_ENTRY_ATTEMPT = now
+
+    finally:
         ENTRY_LOCK.release()
-        return False
-
-    LAST_ENTRY_ATTEMPT = now
-    ENTRY_LOCK.release()
 
     entry_trigger_time = time.time()
 
