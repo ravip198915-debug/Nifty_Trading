@@ -688,10 +688,10 @@ def try_start_entry(side, source_tag="tick"):
             if exec_id != EXECUTION_ID:
                 skip_execution = True
 
-        if skip_execution:
-            return
-        ENTRY_IN_PROGRESS = True
         try:
+            if skip_execution:
+                return
+            ENTRY_IN_PROGRESS = True
             oid = place_entry_order(sym_local)
             if not oid:
                 return
