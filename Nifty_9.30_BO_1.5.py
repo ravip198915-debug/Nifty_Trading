@@ -134,6 +134,7 @@ OPTION_LTP_TIME = {}
 ENTRY_LOCK = threading.Lock()
 LAST_ENTRY_ATTEMPT = 0
 ENTRY_COOLDOWN_SEC = 5
+ENTRY_RESERVED = False
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -539,7 +540,7 @@ def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT
+    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED
 
     if not ENTRY_LOCK.acquire(blocking=False):
         return False
@@ -547,10 +548,13 @@ def try_start_entry(side, source_tag="tick"):
     try:
         now = time.time()
 
+        if ENTRY_RESERVED:
+            return False
+
         if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
             return False
 
-        LAST_ENTRY_ATTEMPT = now
+        ENTRY_RESERVED = True
 
     finally:
         ENTRY_LOCK.release()
@@ -636,7 +640,7 @@ def try_start_entry(side, source_tag="tick"):
     trade.clear()
 
     def run_execution(sym_local):
-        global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT
+        global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED
         try:
             oid = place_entry_order(sym_local)
             if not oid:
@@ -647,6 +651,8 @@ def try_start_entry(side, source_tag="tick"):
             trade_taken = True
             breakout_done = True
             ORDER_PLACED = True
+            LAST_ENTRY_ATTEMPT = time.time()
+            ENTRY_RESERVED = False
             sl_id, tgt_id, _, _ = place_sl_target(sym_local, fill_price)
             if not sl_id or not tgt_id:
                 place_live_exit(sym_local)
@@ -664,6 +670,7 @@ def try_start_entry(side, source_tag="tick"):
             ).start()
         finally:
             ENTRY_IN_PROGRESS = False
+            ENTRY_RESERVED = False
 
     threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL,), daemon=True).start()
     return True
