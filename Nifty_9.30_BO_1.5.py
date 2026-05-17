@@ -536,6 +536,10 @@ def has_any_open_position():
         return False
     return False
 
+def reset_entry_reservation():
+    global ENTRY_RESERVED
+    ENTRY_RESERVED = False
+
 def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
@@ -563,29 +567,37 @@ def try_start_entry(side, source_tag="tick"):
 
     if day_closed:
         log_skip("Day closed")
+        reset_entry_reservation()
         return False
     if trade_taken:
         log_skip("Trade already taken")
+        reset_entry_reservation()
         return False
     if not AUTO_READY:
         log_skip("Auto signal not ready")
+        reset_entry_reservation()
         return False
     if CPR_TYPE == "WIDE":
         if not CPR_BLOCK_HANDLED:
             log_skip("CPR is wide")
             CPR_BLOCK_HANDLED = True
+        reset_entry_reservation()
         return False
     if breakout_done:
         log_skip("Breakout already used")
+        reset_entry_reservation()
         return False
     if allowed_side is None:
         log_skip("Allowed side not set")
+        reset_entry_reservation()
         return False
     if side != allowed_side:
         log_skip(f"{side} breakout but {allowed_side} not allowed")
+        reset_entry_reservation()
         return False
     if FIXED_SYMBOL is None or FIXED_TOKEN is None:
         log_skip("FIXED_SYMBOL unavailable")
+        reset_entry_reservation()
         return False
 
     if not printed_entry:
@@ -607,32 +619,39 @@ def try_start_entry(side, source_tag="tick"):
 
     if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
         log_skip("Existing position detected")
+        reset_entry_reservation()
         return False
     if MODE == "LIVE":
         if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
             log_skip("Pending order exists")
+            reset_entry_reservation()
             return False
     if ENTRY_IN_PROGRESS:
         log_skip("Entry already in progress")
+        reset_entry_reservation()
         return False
     if API_FAILURE_COUNT >= 3:
         if not ENTRY_BLOCK_PRINTED:
             print("⚠️ Entry blocked due to API instability")
             ENTRY_BLOCK_PRINTED = True
         log_skip("API unstable for entries")
+        reset_entry_reservation()
         return False
     ENTRY_BLOCK_PRINTED = False
     if API_FAILURE_COUNT >= 5:
         log_skip("API unavailable")
+        reset_entry_reservation()
         return False
     print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
     print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
     if not wait_for_valid_option_ltp(timeout=10):
         log_skip("Option LTP not recovered")
+        reset_entry_reservation()
         return False
     print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
     if not option_feed_alive():
         log_skip("Option feed inactive")
+        reset_entry_reservation()
         return False
     LAST_BLOCK_REASON = None
 
