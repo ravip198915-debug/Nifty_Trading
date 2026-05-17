@@ -696,8 +696,19 @@ def try_start_entry(side, source_tag="tick"):
             ENTRY_IN_PROGRESS = False
             reset_entry_reserved()
 
-    threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL,), daemon=True).start()
-    return True
+    if ACTIVE_SYMBOL is None:
+        ENTRY_IN_PROGRESS = False
+        reset_entry_reserved()
+        return False
+    try:
+        t = threading.Thread(target=run_execution, args=(ACTIVE_SYMBOL,), daemon=True)
+        t.start()
+        return True
+    except Exception as e:
+        print("Thread start failed:", e)
+        ENTRY_IN_PROGRESS = False
+        reset_entry_reserved()
+        return False
 
 
 # ================= TRADE BLOCK DEBUG ENGINE (NEW FIX) =================
