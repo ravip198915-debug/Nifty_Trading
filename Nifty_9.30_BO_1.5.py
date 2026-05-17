@@ -682,9 +682,14 @@ def try_start_entry(side, source_tag="tick"):
 
     def run_execution(sym_local, exec_id):
         global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, EXECUTION_ID
+        skip_execution = False
+
         with ENTRY_LOCK:
             if exec_id != EXECUTION_ID:
-                return
+                skip_execution = True
+
+        if skip_execution:
+            return
         ENTRY_IN_PROGRESS = True
         try:
             oid = place_entry_order(sym_local)
