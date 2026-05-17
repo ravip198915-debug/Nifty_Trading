@@ -559,25 +559,32 @@ def try_start_entry(side, source_tag="tick"):
     if not ENTRY_LOCK.acquire(blocking=False):
         return False
 
+    should_continue = True
+    current_execution_id = None
+
     try:
         now = time.time()
 
         if ENTRY_RESERVED:
             if now - ENTRY_RESERVED_AT < ENTRY_RESERVATION_TIMEOUT:
-                return False
+                should_continue = False
             else:
                 reset_entry_reserved()
 
-        if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
-            return False
+        if should_continue and (now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC):
+            should_continue = False
 
-        set_entry_reserved()
-        ENTRY_RESERVED_AT = time.time()
-        EXECUTION_ID += 1
-        current_execution_id = EXECUTION_ID
+        if should_continue:
+            set_entry_reserved()
+            ENTRY_RESERVED_AT = time.time()
+            EXECUTION_ID += 1
+            current_execution_id = EXECUTION_ID
 
     finally:
         ENTRY_LOCK.release()
+
+    if not should_continue:
+        return False
 
     entry_trigger_time = time.time()
 
