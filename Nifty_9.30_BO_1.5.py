@@ -135,6 +135,8 @@ ENTRY_LOCK = threading.Lock()
 LAST_ENTRY_ATTEMPT = 0
 ENTRY_COOLDOWN_SEC = 5
 ENTRY_RESERVED = False
+ENTRY_RESERVED_AT = 0
+ENTRY_RESERVATION_TIMEOUT = 5   # seconds
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -549,7 +551,7 @@ def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED
+    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, ENTRY_RESERVED_AT
 
     if not ENTRY_LOCK.acquire(blocking=False):
         return False
@@ -558,12 +560,16 @@ def try_start_entry(side, source_tag="tick"):
         now = time.time()
 
         if ENTRY_RESERVED:
-            return False
+            if now - ENTRY_RESERVED_AT < ENTRY_RESERVATION_TIMEOUT:
+                return False
+            else:
+                reset_entry_reserved()
 
         if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
             return False
 
         set_entry_reserved()
+        ENTRY_RESERVED_AT = time.time()
 
     finally:
         ENTRY_LOCK.release()
