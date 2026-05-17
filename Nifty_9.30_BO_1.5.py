@@ -565,12 +565,15 @@ def try_start_entry(side, source_tag="tick"):
         kws.subscribe([ACTIVE_OPTION_TOKEN])
         kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
 
+    time.sleep(1)
+
     if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
         log_skip("Existing position detected")
         return False
-    if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
-        log_skip("Pending order exists")
-        return False
+    if MODE == "LIVE":
+        if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
+            log_skip("Pending order exists")
+            return False
     if ENTRY_IN_PROGRESS:
         log_skip("Entry already in progress")
         return False
@@ -584,9 +587,12 @@ def try_start_entry(side, source_tag="tick"):
     if API_FAILURE_COUNT >= 5:
         log_skip("API unavailable")
         return False
-    if not wait_for_valid_option_ltp(timeout=5):
+    print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
+    print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
+    if not wait_for_valid_option_ltp(timeout=10):
         log_skip("Option LTP not recovered")
         return False
+    print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
     LAST_BLOCK_REASON = None
 
     ENTRY_IN_PROGRESS = True
@@ -956,7 +962,7 @@ def on_ticks(ws, ticks):
                 # Reject sudden spike (>2% move in one tick)
                 if LAST_VALID_SPOT is not None:
                     change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
-                    if change_pct > 2:
+                    if change_pct > 5:
                         if not printed_bad_tick:
                             print(f"⚠️ Bad tick ignored: {new_price}")
                             printed_bad_tick = True
