@@ -129,6 +129,11 @@ PRINTED_BLOCK_REASONS = {}
 BLOCK_PRINT_COOLDOWN = 60   # seconds
 CPR_BLOCK_HANDLED = False
 FALLBACK_TRIGGERED = False
+OPTION_LTP_CACHE = {}
+OPTION_LTP_TIME = {}
+ENTRY_LOCK = threading.Lock()
+LAST_ENTRY_ATTEMPT = 0
+ENTRY_COOLDOWN_SEC = 5
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -439,6 +444,13 @@ def fetch_930_candle():
             if selected:
                 FIXED_SYMBOL = symbol
                 FIXED_TOKEN = token
+                if kws and FIXED_TOKEN:
+                    try:
+                        kws.subscribe([FIXED_TOKEN])
+                        kws.set_mode(kws.MODE_LTP, [FIXED_TOKEN])
+                        print(f"✅ Pre-subscribed option: {FIXED_SYMBOL}")
+                    except Exception as e:
+                        print("Pre-subscribe error:", e)
                 print(f"Reference Price (9:30 close): {reference_price}")
                 print(f"Selected Strike: {selected['strike']}")
                 print(f"Selected Symbol: {symbol}")
@@ -524,79 +536,94 @@ def has_any_open_position():
     return False
 
 def try_start_entry(side, source_tag="tick"):
-    global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL
+    global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED
+    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT
 
-    if day_closed:
-        log_skip("Day closed")
-        return False
-    if trade_taken:
-        log_skip("Trade already taken")
-        return False
-    if not AUTO_READY:
-        log_skip("Auto signal not ready")
-        return False
-    if CPR_TYPE == "WIDE":
-        if not CPR_BLOCK_HANDLED:
-            log_skip("CPR is wide")
-            CPR_BLOCK_HANDLED = True
-        return False
-    if breakout_done:
-        log_skip("Breakout already used")
-        return False
-    if allowed_side is None:
-        log_skip("Allowed side not set")
-        return False
-    if side != allowed_side:
-        log_skip(f"{side} breakout but {allowed_side} not allowed")
-        return False
-    if FIXED_SYMBOL is None or FIXED_TOKEN is None:
-        log_skip("FIXED_SYMBOL unavailable")
-        return False
-
-    if not printed_entry:
-        print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
-        printed_entry = True
-    ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
-
-    if kws:
-        kws.subscribe([ACTIVE_OPTION_TOKEN])
-        kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
-
-    time.sleep(1)
-
-    if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
-        log_skip("Existing position detected")
-        return False
-    if MODE == "LIVE":
-        if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
-            log_skip("Pending order exists")
+    with ENTRY_LOCK:
+        if time.time() - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
             return False
-    if ENTRY_IN_PROGRESS:
-        log_skip("Entry already in progress")
-        return False
-    if API_FAILURE_COUNT >= 3:
-        if not ENTRY_BLOCK_PRINTED:
-            print("⚠️ Entry blocked due to API instability")
-            ENTRY_BLOCK_PRINTED = True
-        log_skip("API unstable for entries")
-        return False
-    ENTRY_BLOCK_PRINTED = False
-    if API_FAILURE_COUNT >= 5:
-        log_skip("API unavailable")
-        return False
-    print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
-    print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
-    if not wait_for_valid_option_ltp(timeout=10):
-        log_skip("Option LTP not recovered")
-        return False
-    print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
-    LAST_BLOCK_REASON = None
+        LAST_ENTRY_ATTEMPT = time.time()
+        entry_trigger_time = time.time()
 
-    ENTRY_IN_PROGRESS = True
-    trade.clear()
+        if day_closed:
+            log_skip("Day closed")
+            return False
+        if trade_taken:
+            log_skip("Trade already taken")
+            return False
+        if not AUTO_READY:
+            log_skip("Auto signal not ready")
+            return False
+        if CPR_TYPE == "WIDE":
+            if not CPR_BLOCK_HANDLED:
+                log_skip("CPR is wide")
+                CPR_BLOCK_HANDLED = True
+            return False
+        if breakout_done:
+            log_skip("Breakout already used")
+            return False
+        if allowed_side is None:
+            log_skip("Allowed side not set")
+            return False
+        if side != allowed_side:
+            log_skip(f"{side} breakout but {allowed_side} not allowed")
+            return False
+        if FIXED_SYMBOL is None or FIXED_TOKEN is None:
+            log_skip("FIXED_SYMBOL unavailable")
+            return False
+
+        if not printed_entry:
+            print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
+            printed_entry = True
+        ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
+
+        if kws:
+            kws.subscribe([ACTIVE_OPTION_TOKEN])
+            kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
+
+        start_wait = time.time()
+        while time.time() - start_wait < 3:
+            cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
+            if cached is not None and cached > 0:
+                option_ltp = cached
+                break
+            time.sleep(0.1)
+
+        if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
+            log_skip("Existing position detected")
+            return False
+        if MODE == "LIVE":
+            if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
+                log_skip("Pending order exists")
+                return False
+        if ENTRY_IN_PROGRESS:
+            log_skip("Entry already in progress")
+            return False
+        if API_FAILURE_COUNT >= 3:
+            if not ENTRY_BLOCK_PRINTED:
+                print("⚠️ Entry blocked due to API instability")
+                ENTRY_BLOCK_PRINTED = True
+            log_skip("API unstable for entries")
+            return False
+        ENTRY_BLOCK_PRINTED = False
+        if API_FAILURE_COUNT >= 5:
+            log_skip("API unavailable")
+            return False
+        print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
+        print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
+        if not wait_for_valid_option_ltp(timeout=10):
+            log_skip("Option LTP not recovered")
+            return False
+        print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
+        if not option_feed_alive():
+            log_skip("Option feed inactive")
+            return False
+        LAST_BLOCK_REASON = None
+
+        ENTRY_IN_PROGRESS = True
+        trade.clear()
 
     def run_execution(sym_local):
         global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done
@@ -617,6 +644,9 @@ def try_start_entry(side, source_tag="tick"):
             entry_price = fill_price
             quantity = LOT_SIZE
             trade_open = True
+            latency_ms = round((time.time() - entry_trigger_time) * 1000, 2)
+            print(f"⚡ ENTRY LATENCY: {latency_ms} ms")
+            send_telegram(f"⚡ ENTRY LATENCY: {latency_ms} ms")
             threading.Thread(
                 target=monitor_orders,
                 args=(sym_local, sl_id, tgt_id),
@@ -662,13 +692,40 @@ def log_skip(reason):
 
 
 # ================= OPTION LTP RECOVERY (NEW FIX) =================
-def wait_for_valid_option_ltp(timeout=5):
+def wait_for_valid_option_ltp(timeout=10):
+
+    global option_ltp
+
     start = time.time()
+
     while time.time() - start < timeout:
-        if option_ltp is not None and option_ltp > 0:
-            return True
-        time.sleep(0.2)
+
+        cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
+
+        if cached is not None and cached > 0:
+
+            tick_age = time.time() - OPTION_LTP_TIME.get(ACTIVE_OPTION_TOKEN, 0)
+
+            if tick_age <= 2:
+                option_ltp = cached
+                return True
+
+        time.sleep(0.1)
+
     return False
+
+
+def option_feed_alive():
+
+    if ACTIVE_OPTION_TOKEN is None:
+        return False
+
+    last_tick = OPTION_LTP_TIME.get(ACTIVE_OPTION_TOKEN)
+
+    if last_tick is None:
+        return False
+
+    return (time.time() - last_tick) <= 3
 
 
 def place_entry_order(sym):
@@ -962,7 +1019,7 @@ def on_ticks(ws, ticks):
                 # Reject sudden spike (>2% move in one tick)
                 if LAST_VALID_SPOT is not None:
                     change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
-                    if change_pct > 5:
+                    if change_pct > 8:
                         if not printed_bad_tick:
                             print(f"⚠️ Bad tick ignored: {new_price}")
                             printed_bad_tick = True
@@ -979,8 +1036,15 @@ def on_ticks(ws, ticks):
                     FALLBACK_TRIGGERED = False
 
 
-            if ACTIVE_OPTION_TOKEN and t.get("instrument_token") == ACTIVE_OPTION_TOKEN:
-                option_ltp = t["last_price"]
+            if "instrument_token" in t and "last_price" in t:
+                token = t["instrument_token"]
+                OPTION_LTP_CACHE[token] = t["last_price"]
+                OPTION_LTP_TIME[token] = time.time()
+
+            if ACTIVE_OPTION_TOKEN:
+                cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
+                if cached is not None and cached > 0:
+                    option_ltp = cached
 
         # ================= MANUAL ENTRY DETECTION =================
         if not trade_open and not MANUAL_HANDLED:
@@ -1304,12 +1368,12 @@ def heartbeat():
                 if allowed_side is None or fallback_side != allowed_side:
                     continue
 
-                print("⚡ Breakout detected via fallback engine")
-                FALLBACK_TRIGGERED = True
-                try_start_entry(fallback_side, source_tag="fallback")
+                if try_start_entry(fallback_side, source_tag="fallback"):
+                    print("⚡ Breakout detected via fallback engine")
+                    FALLBACK_TRIGGERED = True
 
         # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
-        if time.time() - LAST_TICK_TIME > 10 and not day_closed:
+        if time.time() - LAST_TICK_TIME > 5 and not day_closed:
             print("⚠️ WebSocket stalled — reconnecting")
             send_telegram("⚠️ WebSocket stalled — reconnecting")
             restart_kws()
