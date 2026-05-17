@@ -541,12 +541,13 @@ def try_start_entry(side, source_tag="tick"):
     global trade_taken, breakout_done, entry_price, quantity
     global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT
 
+    if not ENTRY_LOCK.acquire(blocking=False):
+        return False
+
     now = time.time()
 
     if now - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
-        return False
-
-    if not ENTRY_LOCK.acquire(blocking=False):
+        ENTRY_LOCK.release()
         return False
 
     LAST_ENTRY_ATTEMPT = now
