@@ -541,89 +541,95 @@ def try_start_entry(side, source_tag="tick"):
     global trade_taken, breakout_done, entry_price, quantity
     global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT
 
-    with ENTRY_LOCK:
+    if not ENTRY_LOCK.acquire(blocking=False):
+        return False
+
+    try:
         if time.time() - LAST_ENTRY_ATTEMPT < ENTRY_COOLDOWN_SEC:
             return False
         LAST_ENTRY_ATTEMPT = time.time()
-        entry_trigger_time = time.time()
+    finally:
+        ENTRY_LOCK.release()
 
-        if day_closed:
-            log_skip("Day closed")
-            return False
-        if trade_taken:
-            log_skip("Trade already taken")
-            return False
-        if not AUTO_READY:
-            log_skip("Auto signal not ready")
-            return False
-        if CPR_TYPE == "WIDE":
-            if not CPR_BLOCK_HANDLED:
-                log_skip("CPR is wide")
-                CPR_BLOCK_HANDLED = True
-            return False
-        if breakout_done:
-            log_skip("Breakout already used")
-            return False
-        if allowed_side is None:
-            log_skip("Allowed side not set")
-            return False
-        if side != allowed_side:
-            log_skip(f"{side} breakout but {allowed_side} not allowed")
-            return False
-        if FIXED_SYMBOL is None or FIXED_TOKEN is None:
-            log_skip("FIXED_SYMBOL unavailable")
-            return False
+    entry_trigger_time = time.time()
 
-        if not printed_entry:
-            print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
-            printed_entry = True
-        ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
+    if day_closed:
+        log_skip("Day closed")
+        return False
+    if trade_taken:
+        log_skip("Trade already taken")
+        return False
+    if not AUTO_READY:
+        log_skip("Auto signal not ready")
+        return False
+    if CPR_TYPE == "WIDE":
+        if not CPR_BLOCK_HANDLED:
+            log_skip("CPR is wide")
+            CPR_BLOCK_HANDLED = True
+        return False
+    if breakout_done:
+        log_skip("Breakout already used")
+        return False
+    if allowed_side is None:
+        log_skip("Allowed side not set")
+        return False
+    if side != allowed_side:
+        log_skip(f"{side} breakout but {allowed_side} not allowed")
+        return False
+    if FIXED_SYMBOL is None or FIXED_TOKEN is None:
+        log_skip("FIXED_SYMBOL unavailable")
+        return False
 
-        if kws:
-            kws.subscribe([ACTIVE_OPTION_TOKEN])
-            kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
+    if not printed_entry:
+        print(f"ENTRY USING FIXED SYMBOL: {FIXED_SYMBOL}")
+        printed_entry = True
+    ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
-        start_wait = time.time()
-        while time.time() - start_wait < 3:
-            cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
-            if cached is not None and cached > 0:
-                option_ltp = cached
-                break
-            time.sleep(0.1)
+    if kws:
+        kws.subscribe([ACTIVE_OPTION_TOKEN])
+        kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
 
-        if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
-            log_skip("Existing position detected")
-            return False
-        if MODE == "LIVE":
-            if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
-                log_skip("Pending order exists")
-                return False
-        if ENTRY_IN_PROGRESS:
-            log_skip("Entry already in progress")
-            return False
-        if API_FAILURE_COUNT >= 3:
-            if not ENTRY_BLOCK_PRINTED:
-                print("⚠️ Entry blocked due to API instability")
-                ENTRY_BLOCK_PRINTED = True
-            log_skip("API unstable for entries")
-            return False
-        ENTRY_BLOCK_PRINTED = False
-        if API_FAILURE_COUNT >= 5:
-            log_skip("API unavailable")
-            return False
-        print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
-        print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
-        if not wait_for_valid_option_ltp(timeout=10):
-            log_skip("Option LTP not recovered")
-            return False
-        print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
-        if not option_feed_alive():
-            log_skip("Option feed inactive")
-            return False
-        LAST_BLOCK_REASON = None
+    start_wait = time.time()
+    while time.time() - start_wait < 3:
+        cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
+        if cached is not None and cached > 0:
+            option_ltp = cached
+            break
+        time.sleep(0.1)
 
-        ENTRY_IN_PROGRESS = True
-        trade.clear()
+    if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
+        log_skip("Existing position detected")
+        return False
+    if MODE == "LIVE":
+        if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
+            log_skip("Pending order exists")
+            return False
+    if ENTRY_IN_PROGRESS:
+        log_skip("Entry already in progress")
+        return False
+    if API_FAILURE_COUNT >= 3:
+        if not ENTRY_BLOCK_PRINTED:
+            print("⚠️ Entry blocked due to API instability")
+            ENTRY_BLOCK_PRINTED = True
+        log_skip("API unstable for entries")
+        return False
+    ENTRY_BLOCK_PRINTED = False
+    if API_FAILURE_COUNT >= 5:
+        log_skip("API unavailable")
+        return False
+    print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
+    print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
+    if not wait_for_valid_option_ltp(timeout=10):
+        log_skip("Option LTP not recovered")
+        return False
+    print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
+    if not option_feed_alive():
+        log_skip("Option feed inactive")
+        return False
+    LAST_BLOCK_REASON = None
+
+    ENTRY_IN_PROGRESS = True
+    trade.clear()
 
     def run_execution(sym_local):
         global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done
@@ -725,14 +731,19 @@ def option_feed_alive():
     if last_tick is None:
         return False
 
-    return (time.time() - last_tick) <= 3
+    return (time.time() - last_tick) <= 5
 
 
 def place_entry_order(sym):
-    global trade
-    if option_ltp is None:
+    global trade, option_ltp
+    cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
+
+    if cached is None or cached <= 0:
+        log_skip("No option price at execution")
         return None
-    price = round(option_ltp, 1)
+
+    price = round(cached, 1)
+    option_ltp = cached
     order_id = f"PAPER_ENTRY_{int(time.time() * 1000)}"
     trade["paper_entry_symbol"] = sym
     trade["paper_entry_price"] = price
