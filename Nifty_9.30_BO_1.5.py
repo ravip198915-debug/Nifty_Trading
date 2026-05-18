@@ -900,12 +900,27 @@ def place_entry_order(sym):
     global trade, option_ltp
     cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
 
+    # ======================================================
+    # CRITICAL FIX:
+    # Use fallback option_ltp if cache is empty
+    # ======================================================
     if cached is None or cached <= 0:
-        log_skip("No option price at execution")
-        return None
+        if option_ltp is not None and option_ltp > 0:
+            print(
+                f"⚠️ Using fallback option_ltp for entry: {option_ltp}"
+            )
+            cached = option_ltp
+        else:
+            log_skip("No option price at execution")
+            return None
 
     price = round(cached, 1)
     option_ltp = cached
+    print(
+        f"💰 ENTRY PRICE SOURCE | "
+        f"Price={price} | "
+        f"From={'CACHE' if cached == OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN) else 'FALLBACK'}"
+    )
     order_id = f"PAPER_ENTRY_{int(time.time() * 1000)}"
     trade["paper_entry_symbol"] = sym
     trade["paper_entry_price"] = price
