@@ -644,7 +644,11 @@ def try_start_entry(side, source_tag="tick"):
     start_wait = time.time()
     while time.time() - start_wait < 3:
         cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
-        if cached is not None and cached > 0:
+        if (
+            cached is not None
+            and isinstance(cached, (int, float))
+            and cached > 0
+        ):
             option_ltp = cached
             break
         time.sleep(0.1)
@@ -695,6 +699,10 @@ def try_start_entry(side, source_tag="tick"):
                 ]["last_price"]
                 if fallback_ltp and fallback_ltp > 0:
                     option_ltp = fallback_ltp
+                    print(
+                        f"🔄 Syncing fallback LTP to live engine: "
+                        f"{fallback_ltp}"
+                    )
                     OPTION_LTP_CACHE[
                         ACTIVE_OPTION_TOKEN
                     ] = fallback_ltp
@@ -714,7 +722,13 @@ def try_start_entry(side, source_tag="tick"):
             reset_entry_reserved()
             return False
     print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
-    if not option_feed_alive():
+    feed_alive = option_feed_alive()
+    print(
+        f"📡 FEED STATUS | "
+        f"Alive={feed_alive} | "
+        f"LTP={option_ltp}"
+    )
+    if not feed_alive:
         log_skip("Option feed inactive")
         reset_entry_reserved()
         return False
@@ -753,6 +767,11 @@ def try_start_entry(side, source_tag="tick"):
             entry_price = fill_price
             quantity = LOT_SIZE
             trade_open = True
+            print(
+                f"🚀 LIVE ENTRY CONFIRMED | "
+                f"Symbol={sym_local} | "
+                f"LTP={option_ltp}"
+            )
             print(
                 f"✅ TRADE ACTIVATED | "
                 f"Symbol={sym_local} | "
@@ -837,7 +856,11 @@ def wait_for_valid_option_ltp(timeout=10):
 
         cached = OPTION_LTP_CACHE.get(ACTIVE_OPTION_TOKEN)
 
-        if cached is not None and cached > 0:
+        if (
+            cached is not None
+            and isinstance(cached, (int, float))
+            and cached > 0
+        ):
 
             tick_age = time.time() - OPTION_LTP_TIME.get(ACTIVE_OPTION_TOKEN, 0)
 
@@ -851,6 +874,16 @@ def wait_for_valid_option_ltp(timeout=10):
 
 
 def option_feed_alive():
+    global option_ltp
+
+    # ======================================================
+    # CRITICAL FIX:
+    # If valid option LTP already exists,
+    # allow execution even if websocket tick timestamp
+    # is old or temporarily unavailable.
+    # ======================================================
+    if option_ltp is not None and option_ltp > 0:
+        return True
 
     if ACTIVE_OPTION_TOKEN is None:
         return False
