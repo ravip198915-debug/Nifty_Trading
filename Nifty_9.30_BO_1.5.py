@@ -629,8 +629,17 @@ def try_start_entry(side, source_tag="tick"):
     ACTIVE_SYMBOL, ACTIVE_OPTION_TOKEN = FIXED_SYMBOL, FIXED_TOKEN
 
     if kws:
-        kws.subscribe([ACTIVE_OPTION_TOKEN])
-        kws.set_mode(kws.MODE_LTP, [ACTIVE_OPTION_TOKEN])
+        try:
+            print(f"🔄 Force subscribing option token: {ACTIVE_OPTION_TOKEN}")
+            kws.subscribe([ACTIVE_OPTION_TOKEN])
+            kws.set_mode(
+                kws.MODE_LTP,
+                [ACTIVE_OPTION_TOKEN]
+            )
+            # small delay for subscription activation
+            time.sleep(1)
+        except Exception as e:
+            print("Subscription error:", e)
 
     start_wait = time.time()
     while time.time() - start_wait < 3:
@@ -667,10 +676,43 @@ def try_start_entry(side, source_tag="tick"):
         return False
     print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
     print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
-    if not wait_for_valid_option_ltp(timeout=10):
-        log_skip("Option LTP not recovered")
-        reset_entry_reserved()
-        return False
+    # ======================================================
+    # PRIMARY WEBSOCKET LTP RECOVERY
+    # ======================================================
+    if not wait_for_valid_option_ltp(timeout=20):
+        print("⚠️ WebSocket LTP unavailable — trying API fallback")
+        try:
+            ltp_data = safe_kite_call(
+                kite.ltp,
+                [f"NFO:{ACTIVE_SYMBOL}"]
+            )
+            if (
+                ltp_data
+                and f"NFO:{ACTIVE_SYMBOL}" in ltp_data
+            ):
+                fallback_ltp = ltp_data[
+                    f"NFO:{ACTIVE_SYMBOL}"
+                ]["last_price"]
+                if fallback_ltp and fallback_ltp > 0:
+                    option_ltp = fallback_ltp
+                    OPTION_LTP_CACHE[
+                        ACTIVE_OPTION_TOKEN
+                    ] = fallback_ltp
+                    OPTION_LTP_TIME[
+                        ACTIVE_OPTION_TOKEN
+                    ] = time.time()
+                    print(
+                        f"✅ Fallback API LTP recovered: {fallback_ltp}"
+                    )
+            else:
+                log_skip("Option LTP not recovered")
+                reset_entry_reserved()
+                return False
+        except Exception as e:
+            print("Fallback LTP error:", e)
+            log_skip("Option LTP not recovered")
+            reset_entry_reserved()
+            return False
     print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
     if not option_feed_alive():
         log_skip("Option feed inactive")
@@ -711,6 +753,16 @@ def try_start_entry(side, source_tag="tick"):
             entry_price = fill_price
             quantity = LOT_SIZE
             trade_open = True
+            print(
+                f"✅ TRADE ACTIVATED | "
+                f"Symbol={sym_local} | "
+                f"Entry={fill_price}"
+            )
+            send_telegram(
+                f"✅ TRADE ACTIVATED\n"
+                f"Symbol: {sym_local}\n"
+                f"Entry: {fill_price}"
+            )
             latency_ms = round((time.time() - entry_trigger_time) * 1000, 2)
             print(f"⚡ ENTRY LATENCY: {latency_ms} ms")
             send_telegram(f"⚡ ENTRY LATENCY: {latency_ms} ms")
@@ -1107,7 +1159,8 @@ def on_ticks(ws, ticks):
                 # Reject sudden spike (>2% move in one tick)
                 if LAST_VALID_SPOT is not None:
                     change_pct = abs(new_price - LAST_VALID_SPOT) / LAST_VALID_SPOT * 100
-                    if change_pct > 8:
+                    # Ignore only extreme spikes
+                    if change_pct > 15:
                         if not printed_bad_tick:
                             print(f"⚠️ Bad tick ignored: {new_price}")
                             printed_bad_tick = True
@@ -1127,6 +1180,9 @@ def on_ticks(ws, ticks):
             if "instrument_token" in t and "last_price" in t:
                 token = t["instrument_token"]
                 OPTION_LTP_CACHE[token] = t["last_price"]
+                print(
+                    f"📡 OPTION TICK | Token={token} | LTP={t['last_price']}"
+                )
                 OPTION_LTP_TIME[token] = time.time()
 
             if ACTIVE_OPTION_TOKEN:
@@ -1289,6 +1345,11 @@ def on_ticks(ws, ticks):
             else:
                 log_skip("Auto signal not ready")
                 return
+            print(
+                f"⚡ BREAKOUT DETECTED | "
+                f"Side={side} | "
+                f"Spot={spot_ltp}"
+            )
             try_start_entry(side, source_tag="tick")
 
         # ===== POSITION CHECK =====
@@ -1373,8 +1434,8 @@ def restart_kws():
         # Connect again
         kws.connect(threaded=True)
 
-        # Wait briefly for socket readiness
-        time.sleep(1)
+        # Wait for websocket stabilization
+        time.sleep(3)
 
         # Restore subscriptions immediately
         tokens = [SPOT_TOKEN]
@@ -1386,11 +1447,24 @@ def restart_kws():
         tokens = list(dict.fromkeys(tokens))
 
         try:
+            print(f"🔄 Restoring tokens: {tokens}")
             kws.subscribe(tokens)
-            kws.set_mode(kws.MODE_LTP, tokens)
-
+            kws.set_mode(
+                kws.MODE_LTP,
+                tokens
+            )
+            # force resubscribe active option separately
+            if ACTIVE_OPTION_TOKEN:
+                time.sleep(1)
+                kws.subscribe([ACTIVE_OPTION_TOKEN])
+                kws.set_mode(
+                    kws.MODE_LTP,
+                    [ACTIVE_OPTION_TOKEN]
+                )
+                print(
+                    f"✅ Active option restored: {ACTIVE_OPTION_TOKEN}"
+                )
             print("✅ Tokens resubscribed after reconnect")
-
         except Exception as e:
             print("Resubscribe error:", e)
 
@@ -1461,7 +1535,10 @@ def heartbeat():
                     FALLBACK_TRIGGERED = True
 
         # ================= WEBSOCKET AUTO RECOVERY (NEW FIX) =================
-        if time.time() - LAST_TICK_TIME > 5 and not day_closed:
+        if (
+            time.time() - LAST_TICK_TIME > 3
+            and not day_closed
+        ):
             print("⚠️ WebSocket stalled — reconnecting")
             send_telegram("⚠️ WebSocket stalled — reconnecting")
             restart_kws()
