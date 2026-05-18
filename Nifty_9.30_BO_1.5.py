@@ -753,8 +753,18 @@ def try_start_entry(side, source_tag="tick"):
             if not oid:
                 return
             fill_price, _ = wait_for_order_complete(oid)
-            if not fill_price:
+            if fill_price is None or fill_price <= 0:
+                print("❌ Invalid fill price — aborting trade")
+                reset_entry_reserved()
                 return
+
+            if option_ltp is not None:
+                drift = abs(option_ltp - fill_price)
+                if drift > 5:
+                    print(
+                        f"⚠️ Price drift detected | Fill={fill_price} | LTP={option_ltp}"
+                    )
+
             trade_taken = True
             breakout_done = True
             ORDER_PLACED = True
@@ -936,14 +946,46 @@ def wait_for_order_complete(order_id, timeout_sec=20):
     Wait for paper order completion.
     Returns (fill_price, status) where fill_price is None on failure.
     """
+    global option_ltp
+
     if not order_id:
         return None, "INVALID"
 
     deadline = time.time() + timeout_sec
+
     while time.time() < deadline:
-        if option_ltp is not None:
-            fill_price = round(option_ltp, 1)
-            return fill_price, "COMPLETE"
+        # ==================================================
+        # PRIMARY: Use latest websocket LTP
+        # ==================================================
+        if option_ltp is not None and option_ltp > 0:
+            return round(option_ltp, 1), "COMPLETE"
+
+        # ==================================================
+        # FALLBACK: Fetch fresh LTP via API
+        # ==================================================
+        try:
+            ltp_data = safe_kite_call(
+                kite.ltp,
+                [f"NFO:{ACTIVE_SYMBOL}"]
+            )
+
+            if (
+                ltp_data
+                and f"NFO:{ACTIVE_SYMBOL}" in ltp_data
+            ):
+                fresh_ltp = ltp_data[
+                    f"NFO:{ACTIVE_SYMBOL}"
+                ]["last_price"]
+
+                if fresh_ltp and fresh_ltp > 0:
+                    option_ltp = fresh_ltp
+                    print(
+                        f"🔄 Using fresh API LTP for fill: {fresh_ltp}"
+                    )
+                    return round(fresh_ltp, 1), "COMPLETE"
+        except Exception as e:
+            print("Fill LTP fetch error:", e)
+
         time.sleep(POLL_INTERVAL)
 
     return None, "TIMEOUT"
