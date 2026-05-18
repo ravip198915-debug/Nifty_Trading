@@ -138,6 +138,7 @@ ENTRY_RESERVED = False
 ENTRY_RESERVED_AT = 0
 EXECUTION_ID = 0
 ENTRY_RESERVATION_TIMEOUT = 5   # seconds
+ENTRY_TRIGGERED = False
 
 
 AUTO_SIGNAL="NO TRADE"
@@ -554,7 +555,10 @@ def try_start_entry(side, source_tag="tick"):
     global trade_open, ACTIVE_OPTION_TOKEN, ACTIVE_SYMBOL, option_ltp
     global ORDER_PLACED, LAST_BLOCK_REASON, ENTRY_IN_PROGRESS
     global trade_taken, breakout_done, entry_price, quantity
-    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, ENTRY_RESERVED_AT, EXECUTION_ID
+    global printed_entry, ENTRY_BLOCK_PRINTED, CPR_BLOCK_HANDLED, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, ENTRY_RESERVED_AT, EXECUTION_ID, ENTRY_TRIGGERED
+
+    if ENTRY_TRIGGERED:
+        return False
 
     if not ENTRY_LOCK.acquire(blocking=False):
         return False
@@ -579,6 +583,8 @@ def try_start_entry(side, source_tag="tick"):
             ENTRY_RESERVED_AT = time.time()
             EXECUTION_ID += 1
             current_execution_id = EXECUTION_ID
+            ENTRY_TRIGGERED = True
+            print(f"🔒 ENTRY LOCKED | Triggered={ENTRY_TRIGGERED}")
 
     finally:
         ENTRY_LOCK.release()
@@ -591,36 +597,44 @@ def try_start_entry(side, source_tag="tick"):
     if day_closed:
         log_skip("Day closed")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if trade_taken:
         log_skip("Trade already taken")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if not AUTO_READY:
         log_skip("Auto signal not ready")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if CPR_TYPE == "WIDE":
         if not CPR_BLOCK_HANDLED:
             log_skip("CPR is wide")
             CPR_BLOCK_HANDLED = True
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if breakout_done:
         log_skip("Breakout already used")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if allowed_side is None:
         log_skip("Allowed side not set")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if side != allowed_side:
         log_skip(f"{side} breakout but {allowed_side} not allowed")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if FIXED_SYMBOL is None or FIXED_TOKEN is None:
         log_skip("FIXED_SYMBOL unavailable")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
 
     if not printed_entry:
@@ -656,15 +670,18 @@ def try_start_entry(side, source_tag="tick"):
     if get_open_qty(ACTIVE_SYMBOL) > 0 or has_any_open_position():
         log_skip("Existing position detected")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if MODE == "LIVE":
         if has_pending_order(ACTIVE_SYMBOL) or has_any_pending_order():
             log_skip("Pending order exists")
             reset_entry_reserved()
+            ENTRY_TRIGGERED = False
             return False
     if ENTRY_IN_PROGRESS:
         log_skip("Entry already in progress")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     if API_FAILURE_COUNT >= 3:
         if not ENTRY_BLOCK_PRINTED:
@@ -672,11 +689,13 @@ def try_start_entry(side, source_tag="tick"):
             ENTRY_BLOCK_PRINTED = True
         log_skip("API unstable for entries")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     ENTRY_BLOCK_PRINTED = False
     if API_FAILURE_COUNT >= 5:
         log_skip("API unavailable")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     print(f"DEBUG OPTION TOKEN: {ACTIVE_OPTION_TOKEN}")
     print(f"DEBUG OPTION LTP BEFORE WAIT: {option_ltp}")
@@ -715,11 +734,13 @@ def try_start_entry(side, source_tag="tick"):
             else:
                 log_skip("Option LTP not recovered")
                 reset_entry_reserved()
+                ENTRY_TRIGGERED = False
                 return False
         except Exception as e:
             print("Fallback LTP error:", e)
             log_skip("Option LTP not recovered")
             reset_entry_reserved()
+            ENTRY_TRIGGERED = False
             return False
     print(f"DEBUG OPTION LTP RECEIVED: {option_ltp}")
     feed_alive = option_feed_alive()
@@ -731,13 +752,14 @@ def try_start_entry(side, source_tag="tick"):
     if not feed_alive:
         log_skip("Option feed inactive")
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     LAST_BLOCK_REASON = None
 
     trade.clear()
 
     def run_execution(sym_local, exec_id):
-        global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, EXECUTION_ID
+        global trade_open, ENTRY_IN_PROGRESS, entry_price, quantity, trade_taken, ORDER_PLACED, breakout_done, LAST_ENTRY_ATTEMPT, ENTRY_RESERVED, EXECUTION_ID, ENTRY_TRIGGERED
         skip_execution = False
 
         with ENTRY_LOCK:
@@ -756,6 +778,7 @@ def try_start_entry(side, source_tag="tick"):
             if fill_price is None or fill_price <= 0:
                 print("❌ Invalid fill price — aborting trade")
                 reset_entry_reserved()
+                ENTRY_TRIGGERED = False
                 return
 
             if option_ltp is not None:
@@ -806,10 +829,13 @@ def try_start_entry(side, source_tag="tick"):
         finally:
             ENTRY_IN_PROGRESS = False
             reset_entry_reserved()
+            if not trade_open:
+                ENTRY_TRIGGERED = False
 
     if ACTIVE_SYMBOL is None:
         ENTRY_IN_PROGRESS = False
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
     try:
         t = threading.Thread(
@@ -823,6 +849,7 @@ def try_start_entry(side, source_tag="tick"):
         print("Thread start failed:", e)
         ENTRY_IN_PROGRESS = False
         reset_entry_reserved()
+        ENTRY_TRIGGERED = False
         return False
 
 
